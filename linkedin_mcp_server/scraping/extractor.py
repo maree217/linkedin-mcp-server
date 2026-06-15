@@ -2121,35 +2121,17 @@ class LinkedInExtractor:
             f"?vanityName={quote_plus(username)}"
         )
 
-        # Write-gate: submit only when LinkedIn exposed the vanityName invite
-        # anchor. When a note is requested without that anchor, open the
-        # deeplink only as a non-submitting probe so we can report the Premium
-        # note-quota block without accidentally sending from a follow-only or
-        # otherwise unavailable profile.
-        if not signals.has_invite_anchor:
-            if note:
-                logger.info(
-                    "No visible invite anchor for %s; probing custom-invite deeplink "
-                    "because a personalized note was requested",
-                    username,
-                )
-                await self._navigate_to_page(invite_url)
-                note_limit_message = await self._probe_invite_note_limit()
-                if note_limit_message is not None:
-                    return _connection_result(
-                        url,
-                        "custom_note_limit_reached",
-                        note_limit_message,
-                        note_sent=False,
-                        profile=page_text,
-                    )
-            return _connection_result(
-                url,
-                "connect_unavailable",
-                "LinkedIn did not expose a usable Connect action for this profile.",
-                profile=page_text,
-            )
-
+        # Submit via the custom-invite deeplink and let _submit_invite_dialog
+        # be the write-gate: it returns submitted=False without sending when no
+        # invite dialog opens (genuinely unconnectable profiles) and surfaces
+        # the Premium note-quota block. The previous has_invite_anchor pre-gate
+        # produced a false "connect_unavailable" on follow-primary / creator-mode
+        # profiles whose Connect sits in the "More" menu as a button rather than
+        # a /preload/custom-invite anchor: has_invite_anchor stayed False even
+        # after opening the menu, so the deeplink — which opens the dialog
+        # regardless of button placement — was never tried. (The follow_only
+        # More-menu reread above is now redundant for gating and can be removed
+        # in a follow-up.)
         await self._navigate_to_page(invite_url)
 
         submitted, note_sent, note_limit_message = await self._submit_invite_dialog(
