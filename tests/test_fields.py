@@ -22,6 +22,7 @@ class TestPersonSections:
             "projects",
             "contact_info",
             "posts",
+            "comments",
         }
         assert set(PERSON_SECTIONS) == expected
 
@@ -69,6 +70,11 @@ class TestParsePersonSections:
         assert requested == {"main_profile", "experience", "education"}
         assert unknown == []
 
+    def test_posts_and_comments_sections_combine(self):
+        requested, unknown = parse_person_sections("posts,comments")
+        assert requested == {"main_profile", "posts", "comments"}
+        assert unknown == []
+
     def test_invalid_names_returned(self):
         requested, unknown = parse_person_sections("experience,bogus,education")
         assert requested == {"main_profile", "experience", "education"}
@@ -91,7 +97,7 @@ class TestParsePersonSections:
 
     def test_all_sections(self):
         requested, unknown = parse_person_sections(
-            "experience,education,interests,honors,languages,certifications,skills,projects,contact_info,posts"
+            "experience,education,interests,honors,languages,certifications,skills,projects,contact_info,posts,comments"
         )
         assert requested == set(PERSON_SECTIONS)
         assert unknown == []

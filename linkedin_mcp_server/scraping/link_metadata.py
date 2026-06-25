@@ -378,7 +378,7 @@ def derive_context(
     if section_name == "search_results":
         return "job result" if kind == "job" else "search result"
 
-    if section_name == "posts":
+    if section_name in {"posts", "comments"}:
         if kind == "person":
             return "post author"
         if kind == "feed_post":

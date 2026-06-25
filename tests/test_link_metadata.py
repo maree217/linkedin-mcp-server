@@ -298,6 +298,49 @@ class TestBuildReferences:
             }
         ]
 
+    def test_comments_use_post_metadata_contexts(self):
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/in/post-author/",
+                    "text": "Post Author",
+                    "in_article": True,
+                },
+                {
+                    "href": "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+                    "text": "Original post",
+                    "in_article": True,
+                },
+                {
+                    "href": "https://example.com/report",
+                    "text": "Attached report",
+                    "in_article": True,
+                },
+            ],
+            "comments",
+        )
+
+        assert references == [
+            {
+                "kind": "person",
+                "url": "/in/post-author/",
+                "text": "Post Author",
+                "context": "post author",
+            },
+            {
+                "kind": "feed_post",
+                "url": "/feed/update/urn:li:activity:123/",
+                "text": "Original post",
+                "context": "company post",
+            },
+            {
+                "kind": "external",
+                "url": "https://example.com/report",
+                "text": "Attached report",
+                "context": "post attachment",
+            },
+        ]
+
     def test_drops_social_proof_company_labels(self):
         references = build_references(
             [

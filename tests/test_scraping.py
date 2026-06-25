@@ -669,6 +669,7 @@ class TestScrapePersonUrls:
             "projects",
             "contact_info",
             "posts",
+            "comments",
         }
         with (
             patch.object(
@@ -693,8 +694,8 @@ class TestScrapePersonUrls:
         page_urls = [call.args[0] for call in mock_extract.call_args_list]
         overlay_urls = [call.args[0] for call in mock_overlay.call_args_list]
         all_urls = page_urls + overlay_urls
-        # 10 full-page sections + 1 overlay (contact_info)
-        assert len(page_urls) == 10
+        # 11 full-page sections + 1 overlay (contact_info)
+        assert len(page_urls) == 11
         assert len(overlay_urls) == 1
         # Verify each expected suffix was navigated
         assert any(u.endswith("/in/testuser/") for u in all_urls)
@@ -708,6 +709,7 @@ class TestScrapePersonUrls:
         assert any("/details/projects/" in u for u in all_urls)
         assert any("/overlay/contact-info/" in u for u in overlay_urls)
         assert any("/recent-activity/all/" in u for u in all_urls)
+        assert any("/recent-activity/comments/" in u for u in all_urls)
         assert set(result["sections"]) == all_sections
 
     async def test_posts_visits_recent_activity(self, mock_page):
@@ -735,6 +737,59 @@ class TestScrapePersonUrls:
         urls = [call.args[0] for call in mock_extract.call_args_list]
         assert any("/recent-activity/all/" in url for url in urls)
         assert "posts" in result["sections"]
+
+    async def test_comments_visits_recent_activity_comments(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Comment 1\nComment 2"),
+            ) as mock_extract,
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_person("test-user", {"comments"})
+
+        urls = [call.args[0] for call in mock_extract.call_args_list]
+        assert any("/recent-activity/comments/" in url for url in urls)
+        assert "comments" in result["sections"]
+
+    async def test_empty_comments_activity_returns_no_section_error(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=[extracted("profile text"), extracted("")],
+            ) as mock_extract,
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_person("test-user", {"comments"})
+
+        urls = [call.args[0] for call in mock_extract.call_args_list]
+        assert any("/recent-activity/comments/" in url for url in urls)
+        assert result["sections"] == {"main_profile": "profile text"}
+        assert "comments" not in result.get("section_errors", {})
 
     async def test_certifications_visits_details_page(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
@@ -3272,6 +3327,79 @@ class TestActivityFeedExtraction:
 
         # Should return whatever text is available, not crash
         assert result.text == tab_headers
+
+    async def test_comments_activity_raw_text_and_metadata_are_returned(
+        self, mock_page
+    ):
+        comments_text = (
+            "Jane Doe commented on a post\n"
+            "This matches what buyers are asking for in the field.\n"
+            "Post Author\n"
+            "AI adoption patterns in regulated firms\n"
+            "2d"
+        )
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": comments_text,
+                "references": [
+                    {
+                        "href": "https://www.linkedin.com/in/post-author/",
+                        "text": "Post Author",
+                        "in_article": True,
+                    },
+                    {
+                        "href": "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+                        "text": "AI adoption patterns in regulated firms",
+                        "in_article": True,
+                    },
+                ],
+            }
+        )
+        mock_page.wait_for_function = AsyncMock()
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ) as mock_scroll,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor._extract_page_once(
+                "https://www.linkedin.com/in/janedoe/recent-activity/comments/",
+                section_name="comments",
+                max_scrolls=7,
+            )
+
+        assert "This matches what buyers are asking for" in result.text
+        assert "Post Author" in result.text
+        assert "2d" in result.text
+        assert result.references == [
+            {
+                "kind": "person",
+                "url": "/in/post-author/",
+                "text": "Post Author",
+                "context": "post author",
+            },
+            {
+                "kind": "feed_post",
+                "url": "/feed/update/urn:li:activity:123/",
+                "text": "AI adoption patterns in regulated firms",
+                "context": "company post",
+            },
+        ]
+        mock_scroll.assert_awaited_once()
+        _, kwargs = mock_scroll.call_args
+        assert kwargs["pause_time"] == 1.0
+        assert kwargs["max_scrolls"] == 7
 
 
 class TestCompanyPeopleExtraction:
