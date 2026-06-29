@@ -40,6 +40,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
         return_value=ExtractedSection(text="some text", references=[])
     )
     mock.extract_feed = AsyncMock(return_value=ExtractedSection(text="", references=[]))
+    mock.create_post = AsyncMock(return_value=scrape_result)
     return mock
 
 
@@ -1150,6 +1151,146 @@ class TestFeedTools:
         with pytest.raises(ValidationError, match="num_posts"):
             await mcp.call_tool("get_feed", {"num_posts": 51})
 
+    async def test_create_post_dry_run_does_not_publish(self, mock_context):
+        """confirm_post=False is a dry run: the extractor is called with the
+        flag False and the tool surfaces the not-published status."""
+        expected = {
+            "url": "https://www.linkedin.com/feed/",
+            "status": "confirmation_required",
+            "message": "Composer opened and text entered. Set confirm_post=true to publish.",
+            "posted": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "create_post")
+        result = await tool_fn(
+            "Hello LinkedIn from a test.",
+            False,
+            mock_context,
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "confirmation_required"
+        assert result["posted"] is False
+        mock_extractor.create_post.assert_awaited_once_with(
+            "Hello LinkedIn from a test.",
+            confirm_post=False,
+            visibility="anyone",
+        )
+
+    async def test_create_post_publishes_when_confirmed(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/feed/",
+            "status": "posted",
+            "message": "Post published to your LinkedIn feed.",
+            "posted": True,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "create_post")
+        result = await tool_fn(
+            "Shipping a new thing today.",
+            True,
+            mock_context,
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "posted"
+        assert result["posted"] is True
+        mock_extractor.create_post.assert_awaited_once_with(
+            "Shipping a new thing today.",
+            confirm_post=True,
+            visibility="anyone",
+        )
+
+    async def test_create_post_forwards_visibility(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/feed/",
+            "status": "posted",
+            "message": "Post published to your LinkedIn feed.",
+            "posted": True,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "create_post")
+        await tool_fn(
+            "Connections-only update.",
+            True,
+            mock_context,
+            visibility="connections",
+            extractor=mock_extractor,
+        )
+
+        mock_extractor.create_post.assert_awaited_once_with(
+            "Connections-only update.",
+            confirm_post=True,
+            visibility="connections",
+        )
+
+    async def test_create_post_rejects_empty_text(self, mock_context):
+        """Empty body is rejected by Field(min_length=1) validation."""
+        from pydantic import ValidationError
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        with pytest.raises(ValidationError, match="text"):
+            await mcp.call_tool("create_post", {"text": "", "confirm_post": False})
+
+    async def test_create_post_rejects_invalid_visibility(self, mock_context):
+        """visibility outside the allowed set is rejected by pattern validation."""
+        from pydantic import ValidationError
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        with pytest.raises(ValidationError, match="visibility"):
+            await mcp.call_tool(
+                "create_post",
+                {"text": "hi", "confirm_post": False, "visibility": "everyone"},
+            )
+
+    async def test_create_post_error(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.exceptions import SessionExpiredError
+
+        mock_extractor = MagicMock()
+        mock_extractor.create_post = AsyncMock(side_effect=SessionExpiredError())
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "create_post")
+        with pytest.raises(ToolError, match="Session expired"):
+            await tool_fn(
+                "Hello!",
+                True,
+                mock_context,
+                extractor=mock_extractor,
+            )
+
 
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
@@ -1172,6 +1313,7 @@ class TestToolTimeouts:
             "search_conversations",
             "send_message",
             "get_feed",
+            "create_post",
             "close_session",
         )
 
@@ -1203,6 +1345,7 @@ class TestToolTimeouts:
             "search_conversations",
             "send_message",
             "get_feed",
+            "create_post",
             "close_session",
         )
 

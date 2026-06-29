@@ -108,3 +108,78 @@ def register_feed_tools(
                 raise_tool_error(relogin_exc, "get_feed")
         except Exception as e:
             raise_tool_error(e, "get_feed")
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Create Post",
+        annotations={"destructiveHint": True, "openWorldHint": True},
+        tags={"feed", "actions"},
+        exclude_args=["extractor"],
+    )
+    async def create_post(
+        text: Annotated[str, Field(min_length=1, max_length=3000)],
+        confirm_post: bool,
+        ctx: Context,
+        visibility: Annotated[
+            str, Field(pattern="^(anyone|connections)$")
+        ] = "anyone",
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Publish a short text post to the authenticated user's LinkedIn feed.
+
+        This is a WRITE operation. It is gated on confirm_post: with
+        confirm_post=False (the safe default to preview) the share composer is
+        opened and the text entered, but the post is NOT published — a dry run
+        that returns status="confirmation_required". Set confirm_post=True to
+        actually publish.
+
+        Note: this creates a standard feed POST, not a long-form ARTICLE.
+        LinkedIn's article composer (/pulse) is not automatable here — draft
+        articles externally and paste them into LinkedIn yourself.
+
+        Args:
+            text: The post body (1-3000 characters; 3000 is LinkedIn's limit).
+            confirm_post: Must be True to publish. False does a dry run.
+            ctx: FastMCP context for progress reporting.
+            visibility: Audience for the post — "anyone" (public, default) or
+                "connections". Applied best-effort; LinkedIn's current default
+                audience is used if the selector is unavailable.
+
+        Returns:
+            Dict with url, status, message, and posted (bool). Statuses:
+            "posted", "confirmation_required", "composer_unavailable",
+            "post_button_unavailable".
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="create_post"
+            )
+            logger.info(
+                "Creating feed post (confirm_post=%s, visibility=%s, length=%d)",
+                confirm_post,
+                visibility,
+                len(text),
+            )
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Opening share composer"
+            )
+
+            result = await extractor.create_post(
+                text,
+                confirm_post=confirm_post,
+                visibility=visibility,
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "create_post")
+        except Exception as e:
+            raise_tool_error(e, "create_post")  # NoReturn

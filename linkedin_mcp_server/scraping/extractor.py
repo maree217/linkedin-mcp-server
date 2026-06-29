@@ -3603,6 +3603,174 @@ class LinkedInExtractor:
             references=references,
         )
 
+    def _post_action_result(
+        self,
+        url: str,
+        status: str,
+        message: str,
+        *,
+        posted: bool = False,
+    ) -> dict[str, Any]:
+        """Uniform return shape for create_post outcomes."""
+        return {
+            "url": url,
+            "status": status,
+            "message": message,
+            "posted": posted,
+        }
+
+    async def _dismiss_post_ui(self) -> None:
+        """Best-effort close of the share composer without publishing.
+
+        Presses Escape; if LinkedIn shows a "Discard"/"Discard draft" confirm
+        (it does once there is text), clicks it so no orphaned draft is left.
+        """
+        try:
+            await self._page.keyboard.press("Escape")
+            await asyncio.sleep(0.2)
+            await self._page.evaluate(
+                """() => {
+                    const btn = Array.from(document.querySelectorAll('button')).find(b => {
+                        const label = ((b.getAttribute('aria-label') || '') + ' '
+                            + (b.innerText || '')).toLowerCase();
+                        return label.includes('discard');
+                    });
+                    if (btn) btn.click();
+                }"""
+            )
+        except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
+            logger.debug("Could not cleanly dismiss share composer: %s", exc)
+
+    async def create_post(
+        self,
+        text: str,
+        *,
+        confirm_post: bool,
+        visibility: str = "anyone",
+    ) -> dict[str, Any]:
+        """Publish a short text post to the authenticated user's feed.
+
+        Drives LinkedIn's share composer via browser automation. This is a
+        WRITE operation gated on confirm_post: with confirm_post=False the
+        composer is opened and filled but NOT published (a dry run).
+
+        Note: this creates a standard feed post, not a long-form article —
+        LinkedIn's /pulse article composer is not automatable here.
+
+        Args:
+            text: Post body (validated 1-3000 chars at the tool layer).
+            confirm_post: Must be True to publish. False does a dry run.
+            visibility: "anyone" (public) or "connections". Best-effort; the
+                current LinkedIn default audience is used if not changeable.
+        """
+        feed_url = "https://www.linkedin.com/feed/"
+        await self._navigate_to_page(feed_url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug("Feed page did not fully load before composing a post")
+
+        await handle_modal_close(self._page)
+
+        # Open the share composer. The "Start a post" trigger has a stable
+        # aria-label/text; click it via JS because patchright actionability
+        # checks otherwise stall on the same wait_for timeout send_message hits.
+        opened = await self._page.evaluate(
+            """() => {
+                const btn = Array.from(document.querySelectorAll('button')).find(b => {
+                    const label = ((b.getAttribute('aria-label') || '') + ' '
+                        + (b.innerText || '')).toLowerCase();
+                    return label.includes('start a post') || label.includes('create a post');
+                });
+                if (!btn) return false;
+                btn.click();
+                return true;
+            }"""
+        )
+        if not opened:
+            return self._post_action_result(
+                self._page.url,
+                "composer_unavailable",
+                "Could not find the 'Start a post' control on the feed.",
+            )
+
+        # Wait for the share editor to hydrate, then focus it. Selectors use
+        # role + contenteditable + aria-label (ARIA only, no layout class names)
+        # so they stay stable across LinkedIn UI changes.
+        editor_ready = False
+        for _ in range(20):
+            editor_ready = await self._page.evaluate(
+                """() => {
+                    const el = document.querySelector(
+                        'div[role="textbox"][contenteditable="true"][aria-label*="Text editor"],'
+                        + 'div.ql-editor[contenteditable="true"],'
+                        + 'div[role="textbox"][contenteditable="true"]'
+                    );
+                    if (!el) return false;
+                    el.focus();
+                    return true;
+                }"""
+            )
+            if editor_ready:
+                break
+            await asyncio.sleep(0.25)
+
+        if not editor_ready:
+            await self._dismiss_post_ui()
+            return self._post_action_result(
+                self._page.url,
+                "composer_unavailable",
+                "Share composer did not open or could not be focused.",
+            )
+
+        # Type via page.keyboard (operates on the focused element directly and
+        # fires the real keydown/input/keyup events React needs to enable Post).
+        await asyncio.sleep(0.1)
+        await self._page.keyboard.type(text, delay=10)
+        await asyncio.sleep(0.3)
+
+        if not confirm_post:
+            await self._dismiss_post_ui()
+            return self._post_action_result(
+                feed_url,
+                "confirmation_required",
+                "Composer opened and text entered. Set confirm_post=true to publish.",
+            )
+
+        # Publish: JS-click the primary "Post" button (patchright actionability
+        # also blocks a normal .click()), same approach as send_message's Send.
+        await asyncio.sleep(0.5)  # allow React to enable the Post button
+        posted = await self._page.evaluate(
+            """() => {
+                const btn = Array.from(document.querySelectorAll('button')).find(b => {
+                    if (b.disabled) return false;
+                    const t = (b.innerText || '').trim().toLowerCase();
+                    const al = (b.getAttribute('aria-label') || '').trim().toLowerCase();
+                    return t === 'post' || al === 'post';
+                });
+                if (!btn) return false;
+                btn.click();
+                return true;
+            }"""
+        )
+        if not posted:
+            await self._dismiss_post_ui()
+            return self._post_action_result(
+                self._page.url,
+                "post_button_unavailable",
+                "Text was entered but the Post button could not be activated.",
+            )
+
+        await asyncio.sleep(1.5)
+        return self._post_action_result(
+            self._page.url,
+            "posted",
+            "Post published to your LinkedIn feed.",
+            posted=True,
+        )
+
     async def send_message(
         self,
         linkedin_username: str,
