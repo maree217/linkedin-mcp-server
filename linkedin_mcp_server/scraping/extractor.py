@@ -3792,6 +3792,165 @@ class LinkedInExtractor:
             posted=True,
         )
 
+    def _comment_action_result(
+        self,
+        url: str,
+        status: str,
+        message: str,
+        *,
+        commented: bool = False,
+    ) -> dict[str, Any]:
+        """Uniform return shape for comment_on_post outcomes."""
+        return {
+            "url": url,
+            "status": status,
+            "message": message,
+            "commented": commented,
+        }
+
+    async def _clear_comment_box(self) -> None:
+        """Best-effort clear of the comment editor after a dry run.
+
+        Empties the focused contenteditable and fires an input event so React
+        drops the draft, then blurs — leaving no orphaned comment under the
+        post. Done via JS (not Ctrl/Meta+A) to stay platform-independent.
+        """
+        try:
+            await self._page.evaluate(
+                """() => {
+                    const el = document.activeElement;
+                    if (el && el.isContentEditable) {
+                        el.textContent = '';
+                        el.dispatchEvent(new InputEvent('input', {bubbles: true}));
+                        el.blur();
+                    }
+                }"""
+            )
+        except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
+            logger.debug("Could not cleanly clear the comment box: %s", exc)
+
+    async def comment_on_post(
+        self,
+        post_url: str,
+        text: str,
+        *,
+        confirm_comment: bool,
+    ) -> dict[str, Any]:
+        """Comment on a specific LinkedIn post with explicit confirmation gating.
+
+        Navigates to the post permalink and drives the comment editor via
+        browser automation. WRITE operation gated on confirm_comment: with
+        confirm_comment=False the comment box is opened and filled but the
+        comment is NOT published (a dry run).
+
+        Args:
+            post_url: Permalink of the post to comment on (e.g. a
+                /feed/update/urn:li:activity:... or /posts/<slug> URL, such as
+                the entries get_feed returns under references["feed"]).
+            text: Comment body (validated 1-1250 chars at the tool layer).
+            confirm_comment: Must be True to publish. False does a dry run.
+        """
+        await self._navigate_to_page(post_url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug("Post page did not fully load before commenting")
+
+        await handle_modal_close(self._page)
+
+        # Open + focus the comment editor. On a post permalink the comment box
+        # is usually present but unfocused; some layouts require clicking the
+        # "Comment" action first. Retry through React hydration: each pass tries
+        # to focus an existing comment editor, else clicks a Comment trigger to
+        # reveal it. ARIA/contenteditable selectors only (no layout classes).
+        editor_ready = False
+        for _ in range(20):
+            editor_ready = await self._page.evaluate(
+                """() => {
+                    const boxes = Array.from(document.querySelectorAll(
+                        'div[role="textbox"][contenteditable="true"],'
+                        + 'div.ql-editor[contenteditable="true"]'
+                    ));
+                    const commentBox = boxes.find(b =>
+                        (b.getAttribute('aria-label') || '')
+                            .toLowerCase().includes('comment')
+                    ) || boxes[0];
+                    if (commentBox) { commentBox.focus(); return true; }
+                    const trigger = Array.from(
+                        document.querySelectorAll('button, [role="button"]')
+                    ).find(b => {
+                        const l = ((b.getAttribute('aria-label') || '') + ' '
+                            + (b.innerText || '')).trim().toLowerCase();
+                        return l === 'comment' || l === 'leave a comment'
+                            || l === 'add a comment';
+                    });
+                    if (trigger) trigger.click();
+                    return false;
+                }"""
+            )
+            if editor_ready:
+                break
+            await asyncio.sleep(0.25)
+
+        if not editor_ready:
+            return self._comment_action_result(
+                self._page.url,
+                "comment_box_unavailable",
+                "Could not open or focus the comment box on this post.",
+            )
+
+        # Type via page.keyboard so React sees real key events and enables Post.
+        await asyncio.sleep(0.1)
+        await self._page.keyboard.type(text, delay=10)
+        await asyncio.sleep(0.3)
+
+        if not confirm_comment:
+            await self._clear_comment_box()
+            return self._comment_action_result(
+                post_url,
+                "confirmation_required",
+                "Comment box opened and text entered. "
+                "Set confirm_comment=true to publish.",
+            )
+
+        # Publish: JS-click the comment submit button (patchright actionability
+        # blocks a normal .click()). The submit reads "Post"/"Reply" or carries
+        # an aria-label of "Post comment"; the disabled empty state is skipped.
+        # Deliberately NOT matching aria-label "Comment" — that is the action-bar
+        # toggle, not the submit.
+        await asyncio.sleep(0.5)
+        commented = await self._page.evaluate(
+            """() => {
+                const btn = Array.from(document.querySelectorAll('button')).find(b => {
+                    if (b.disabled) return false;
+                    const t = (b.innerText || '').trim().toLowerCase();
+                    const al = (b.getAttribute('aria-label') || '').trim().toLowerCase();
+                    return t === 'post' || t === 'reply' || al === 'post comment';
+                });
+                if (!btn) return false;
+                btn.click();
+                return true;
+            }"""
+        )
+        if not commented:
+            await self._clear_comment_box()
+            return self._comment_action_result(
+                self._page.url,
+                "comment_button_unavailable",
+                "Text was entered but the comment submit button could not "
+                "be activated.",
+            )
+
+        await asyncio.sleep(1.5)
+        return self._comment_action_result(
+            self._page.url,
+            "commented",
+            "Comment published on the post.",
+            commented=True,
+        )
+
     async def send_message(
         self,
         linkedin_username: str,

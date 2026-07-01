@@ -183,3 +183,72 @@ def register_feed_tools(
                 raise_tool_error(relogin_exc, "create_post")
         except Exception as e:
             raise_tool_error(e, "create_post")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Comment On Post",
+        annotations={"destructiveHint": True, "openWorldHint": True},
+        tags={"feed", "actions"},
+        exclude_args=["extractor"],
+    )
+    async def comment_on_post(
+        post_url: Annotated[str, Field(min_length=1)],
+        text: Annotated[str, Field(min_length=1, max_length=1250)],
+        confirm_comment: bool,
+        ctx: Context,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Publish a comment on a specific LinkedIn post.
+
+        This is a WRITE operation gated on confirm_comment: with
+        confirm_comment=False (the safe default to preview) the comment box is
+        opened and the text entered, but nothing is published — a dry run
+        returning status="confirmation_required". Set confirm_comment=True to
+        actually publish the comment.
+
+        Args:
+            post_url: Permalink of the post to comment on — e.g. the
+                /feed/update/urn:li:activity:... or /posts/<slug> URLs that
+                get_feed returns under references["feed"].
+            text: The comment body (1-1250 characters; 1250 is LinkedIn's
+                comment limit).
+            confirm_comment: Must be True to publish. False does a dry run.
+            ctx: FastMCP context for progress reporting.
+
+        Returns:
+            Dict with url, status, message, and commented (bool). Statuses:
+            "commented", "confirmation_required", "comment_box_unavailable",
+            "comment_button_unavailable".
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="comment_on_post"
+            )
+            logger.info(
+                "Commenting on post (confirm_comment=%s, length=%d)",
+                confirm_comment,
+                len(text),
+            )
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Opening comment box"
+            )
+
+            result = await extractor.comment_on_post(
+                post_url,
+                text,
+                confirm_comment=confirm_comment,
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "comment_on_post")
+        except Exception as e:
+            raise_tool_error(e, "comment_on_post")  # NoReturn

@@ -41,6 +41,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     )
     mock.extract_feed = AsyncMock(return_value=ExtractedSection(text="", references=[]))
     mock.create_post = AsyncMock(return_value=scrape_result)
+    mock.comment_on_post = AsyncMock(return_value=scrape_result)
     return mock
 
 
@@ -1291,6 +1292,128 @@ class TestFeedTools:
                 extractor=mock_extractor,
             )
 
+    async def test_comment_on_post_dry_run_does_not_publish(self, mock_context):
+        """confirm_comment=False is a dry run: the extractor is called with the
+        flag False and the tool surfaces the not-published status."""
+        expected = {
+            "url": "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+            "status": "confirmation_required",
+            "message": "Comment box opened and text entered. "
+            "Set confirm_comment=true to publish.",
+            "commented": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "comment_on_post")
+        result = await tool_fn(
+            "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+            "Great point — fully agree.",
+            False,
+            mock_context,
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "confirmation_required"
+        assert result["commented"] is False
+        mock_extractor.comment_on_post.assert_awaited_once_with(
+            "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+            "Great point — fully agree.",
+            confirm_comment=False,
+        )
+
+    async def test_comment_on_post_publishes_when_confirmed(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+            "status": "commented",
+            "message": "Comment published on the post.",
+            "commented": True,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "comment_on_post")
+        result = await tool_fn(
+            "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+            "Sharp analysis — thanks for posting.",
+            True,
+            mock_context,
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "commented"
+        assert result["commented"] is True
+        mock_extractor.comment_on_post.assert_awaited_once_with(
+            "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+            "Sharp analysis — thanks for posting.",
+            confirm_comment=True,
+        )
+
+    async def test_comment_on_post_rejects_empty_text(self, mock_context):
+        """Empty comment body is rejected by Field(min_length=1) validation."""
+        from pydantic import ValidationError
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        with pytest.raises(ValidationError, match="text"):
+            await mcp.call_tool(
+                "comment_on_post",
+                {
+                    "post_url": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+                    "text": "",
+                    "confirm_comment": False,
+                },
+            )
+
+    async def test_comment_on_post_rejects_empty_post_url(self, mock_context):
+        """Empty post_url is rejected by Field(min_length=1) validation."""
+        from pydantic import ValidationError
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        with pytest.raises(ValidationError, match="post_url"):
+            await mcp.call_tool(
+                "comment_on_post",
+                {"post_url": "", "text": "hi", "confirm_comment": False},
+            )
+
+    async def test_comment_on_post_error(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.exceptions import SessionExpiredError
+
+        mock_extractor = MagicMock()
+        mock_extractor.comment_on_post = AsyncMock(side_effect=SessionExpiredError())
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "comment_on_post")
+        with pytest.raises(ToolError, match="Session expired"):
+            await tool_fn(
+                "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+                "Hello!",
+                True,
+                mock_context,
+                extractor=mock_extractor,
+            )
+
 
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
@@ -1314,6 +1437,7 @@ class TestToolTimeouts:
             "send_message",
             "get_feed",
             "create_post",
+            "comment_on_post",
             "close_session",
         )
 
@@ -1346,6 +1470,7 @@ class TestToolTimeouts:
             "send_message",
             "get_feed",
             "create_post",
+            "comment_on_post",
             "close_session",
         )
 
