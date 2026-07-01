@@ -3677,18 +3677,39 @@ class LinkedInExtractor:
         # Open the share composer. The "Start a post" trigger has a stable
         # aria-label/text; click it via JS because patchright actionability
         # checks otherwise stall on the same wait_for timeout send_message hits.
-        opened = await self._page.evaluate(
-            """() => {
-                const btn = Array.from(document.querySelectorAll('button')).find(b => {
-                    const label = ((b.getAttribute('aria-label') || '') + ' '
-                        + (b.innerText || '')).toLowerCase();
-                    return label.includes('start a post') || label.includes('create a post');
-                });
-                if (!btn) return false;
-                btn.click();
-                return true;
-            }"""
-        )
+        # Retry in a loop: wait_for_selector("main") resolves before the
+        # share-box entry React-hydrates, so a single-shot search races the
+        # feed and intermittently returns composer_unavailable. Also match
+        # [role="button"] / label-bearing containers, since LinkedIn sometimes
+        # renders the trigger as a non-<button> element.
+        opened = False
+        for _ in range(20):
+            opened = await self._page.evaluate(
+                """() => {
+                    const matches = (el) => {
+                        const label = ((el.getAttribute('aria-label') || '') + ' '
+                            + (el.getAttribute('placeholder') || '') + ' '
+                            + (el.innerText || '')).toLowerCase();
+                        return label.includes('start a post')
+                            || label.includes('create a post');
+                    };
+                    let btn = Array.from(
+                        document.querySelectorAll('button, [role="button"]')
+                    ).find(matches);
+                    if (!btn) {
+                        const leaf = Array.from(document.querySelectorAll('*')).find(
+                            el => el.children.length === 0 && matches(el)
+                        );
+                        if (leaf) btn = leaf.closest('button, [role="button"]') || leaf;
+                    }
+                    if (!btn) return false;
+                    btn.click();
+                    return true;
+                }"""
+            )
+            if opened:
+                break
+            await asyncio.sleep(0.25)
         if not opened:
             return self._post_action_result(
                 self._page.url,
