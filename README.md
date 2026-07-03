@@ -11,6 +11,20 @@
 
 An MCP server that lets AI assistants like Claude read LinkedIn data through your own logged-in browser session. Access profiles and companies, search for jobs, or get job details.
 
+## Fork branch discipline (Ram's fork)
+
+The running server (`uvx --from /Users/rammaree/projects/forks/linkedin-mcp-server`) executes **whatever branch is checked out on disk** — there is no branch pin in the MCP config. Reconnects silently pick up whatever HEAD points to at that moment.
+
+- **Canonical branch: `feat/create-post-tool`.** It carries auth-session-resilience fixes, the connect-fix (`6519f11`, merged in via `main` at commit `530a48d`, 2026-07-03), TASK-208 comments, and the create-post/comment-on-post tools.
+- **Never check out a branch that lacks `6519f11`.** Without it, `connect_with_person` silently fails `connect_unavailable` on follow-primary/creator-mode profiles (the has_invite_anchor pre-gate blocks the deeplink send). This bit us mid-outreach on 2026-06-25 (TASK-217).
+- **Verify before trusting any branch:**
+  ```bash
+  git merge-base --is-ancestor 6519f11 HEAD && echo "OK: connect-fix present" || echo "MISSING connect-fix"
+  ```
+  Run this after any branch switch, rebase, or before promoting a new "stable" branch.
+
+**Known remaining gap (deferred, TASK-217 AC#4):** even with `6519f11` present, `connect_with_person` still returns `connect_unavailable` on profiles using the Premium "Book an appointment" business layout / email-gated connect flow — hit live on Kesiena Ogefere and Tobba Vigfusdottir, 2026-06-25. The deeplink opens no usable invite dialog for those profiles. These require **manual send**; no automated fix is planned yet — treat as a known limitation, not a bug to chase.
+
 ## Sponsor
 
 <p align="center">
