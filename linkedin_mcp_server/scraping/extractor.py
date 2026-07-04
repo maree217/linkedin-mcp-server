@@ -3951,6 +3951,147 @@ class LinkedInExtractor:
             commented=True,
         )
 
+    async def get_post_comments(
+        self,
+        post_url: str,
+        *,
+        max_comments: int = 100,
+        max_scrolls: int = 15,
+    ) -> dict[str, Any]:
+        """Extract the list of commenters (and their comment text) on a post.
+
+        Navigates to the post permalink, repeatedly clicks "Load more
+        comments" and scrolls, then walks each comment block in the DOM to
+        pull the commenter's name, headline, profile URL, and comment body.
+        READ-only.
+
+        Args:
+            post_url: Permalink of the post (a /feed/update/urn:li:activity:...
+                or /posts/<slug> URL).
+            max_comments: Stop once this many distinct comments are collected.
+            max_scrolls: Max "Load more comments" + scroll iterations.
+
+        Returns:
+            Dict with url, comment_count, and comments (list of
+            {name, headline, profile_url, text}). On rate limit returns
+            {url, error: "rate_limit"}.
+        """
+        await self._navigate_to_page(post_url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main", timeout=15000)
+        except PlaywrightTimeoutError:
+            logger.debug("Post page did not fully load before reading comments")
+
+        await handle_modal_close(self._page)
+
+        # Progressively reveal comments: click any "Load more comments" /
+        # "Show more comments" / "Load previous replies" control, else scroll
+        # the window to trigger lazy loading. Stop early once we have enough
+        # comment blocks or the count stops growing.
+        prev_count = -1
+        stagnant = 0
+        for _ in range(max_scrolls):
+            count = await self._page.evaluate(
+                "() => document.querySelectorAll("
+                "'article.comments-comment-entity, "
+                "div.comments-comment-entity, "
+                "article[class*=\"comments-comment-item\"]').length"
+            )
+            if count >= max_comments:
+                break
+            if count == prev_count:
+                stagnant += 1
+                if stagnant >= 2:
+                    break
+            else:
+                stagnant = 0
+            prev_count = count
+
+            clicked = await self._page.evaluate(
+                """() => {
+                    const labels = ['load more comments', 'show more comments',
+                        'load previous comments', 'load more replies',
+                        'show previous replies', 'load previous replies'];
+                    const btn = Array.from(
+                        document.querySelectorAll('button, [role="button"]')
+                    ).find(b => {
+                        const t = ((b.innerText || '') + ' '
+                            + (b.getAttribute('aria-label') || ''))
+                            .trim().toLowerCase();
+                        return labels.some(l => t.includes(l));
+                    });
+                    if (btn) { btn.click(); return true; }
+                    return false;
+                }"""
+            )
+            if not clicked:
+                await self._page.evaluate(
+                    "() => window.scrollBy(0, document.body.scrollHeight)"
+                )
+            await asyncio.sleep(1.2)
+
+        comments: list[dict[str, str]] = await self._page.evaluate(
+            """(maxComments) => {
+                const norm = (href) => {
+                    if (!href) return '';
+                    const i = href.indexOf('/in/');
+                    if (i === -1) return '';
+                    let slug = href.slice(i + 4).split(/[/?#]/)[0];
+                    if (!slug) return '';
+                    return 'https://www.linkedin.com/in/' + slug + '/';
+                };
+                const blocks = Array.from(document.querySelectorAll(
+                    'article.comments-comment-entity, '
+                    + 'div.comments-comment-entity, '
+                    + 'article[class*="comments-comment-item"]'
+                ));
+                const out = [];
+                const seen = new Set();
+                for (const b of blocks) {
+                    const link = b.querySelector('a[href*="/in/"]');
+                    const profile = link ? norm(link.getAttribute('href')) : '';
+                    // Name: prefer explicit title node, else the profile link text.
+                    let name = '';
+                    const titleEl = b.querySelector(
+                        '.comments-comment-meta__description-title, '
+                        + '.comments-post-meta__name-text, '
+                        + 'span.comments-comment-meta__description-title'
+                    );
+                    if (titleEl) name = (titleEl.innerText || '').trim();
+                    if (!name && link) name = (link.innerText || '').trim()
+                        .split('\\n')[0].trim();
+                    // Headline / subtitle.
+                    let headline = '';
+                    const subEl = b.querySelector(
+                        '.comments-comment-meta__description-subtitle');
+                    if (subEl) headline = (subEl.innerText || '').trim();
+                    // Comment body text.
+                    let text = '';
+                    const bodyEl = b.querySelector(
+                        '.comments-comment-item__main-content, '
+                        + '.update-components-text, '
+                        + '.comments-comment-item-content-body');
+                    if (bodyEl) text = (bodyEl.innerText || '').trim();
+                    if (!profile && !name) continue;
+                    const key = profile || name;
+                    if (seen.has(key + '|' + text)) continue;
+                    seen.add(key + '|' + text);
+                    out.push({name, headline, profile_url: profile, text});
+                    if (out.length >= maxComments) break;
+                }
+                return out;
+            }""",
+            max_comments,
+        )
+
+        return {
+            "url": self._page.url,
+            "comment_count": len(comments),
+            "comments": comments,
+        }
+
     async def send_message(
         self,
         linkedin_username: str,

@@ -111,6 +111,76 @@ def register_feed_tools(
 
     @mcp.tool(
         timeout=tool_timeout,
+        title="Get Post Comments",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"feed", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def get_post_comments(
+        post_url: Annotated[str, Field(min_length=1)],
+        ctx: Context,
+        max_comments: Annotated[int, Field(ge=1, le=300)] = 100,
+        max_scrolls: Annotated[int, Field(ge=1, le=40)] = 15,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Get the list of commenters on a specific LinkedIn post.
+
+        Navigates to the post permalink, expands the comment thread (clicking
+        "Load more comments" and scrolling), and returns each commenter's
+        name, headline, profile URL, and comment text. READ-only.
+
+        This is the reverse of get_person_profile(sections="comments"), which
+        returns one person's own comment history; this returns everyone who
+        commented on one post.
+
+        Args:
+            post_url: Permalink of the post — a
+                /feed/update/urn:li:activity:... or /posts/<slug> URL.
+            max_comments: Stop once this many distinct comments are collected
+                (1-300, default 100).
+            max_scrolls: Max "Load more comments" + scroll iterations
+                (1-40, default 15). Raise for posts with hundreds of comments.
+
+        Returns:
+            Dict with url, comment_count, and comments (list of
+            {name, headline, profile_url, text}). On rate limit returns a
+            dict with error="rate_limit".
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_post_comments"
+            )
+            logger.info(
+                "Scraping post comments (max_comments=%d, max_scrolls=%d)",
+                max_comments,
+                max_scrolls,
+            )
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Loading post comments"
+            )
+
+            result = await extractor.get_post_comments(
+                post_url,
+                max_comments=max_comments,
+                max_scrolls=max_scrolls,
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_post_comments")
+        except Exception as e:
+            raise_tool_error(e, "get_post_comments")
+
+    @mcp.tool(
+        timeout=tool_timeout,
         title="Create Post",
         annotations={"destructiveHint": True, "openWorldHint": True},
         tags={"feed", "actions"},
