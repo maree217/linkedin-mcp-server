@@ -17,6 +17,7 @@ The running server (`uvx --from /Users/rammaree/projects/forks/linkedin-mcp-serv
 
 - **Canonical branch: `feat/create-post-tool`.** It carries auth-session-resilience fixes, the connect-fix (`6519f11`, merged in via `main` at commit `530a48d`, 2026-07-03), TASK-208 comments, and the create-post/comment-on-post tools.
 - **Never check out a branch that lacks `6519f11`.** Without it, `connect_with_person` silently fails `connect_unavailable` on follow-primary/creator-mode profiles (the has_invite_anchor pre-gate blocks the deeplink send). This bit us mid-outreach on 2026-06-25 (TASK-217).
+- **Connect-fix verified live 2026-07-09 (TASK-217 closed).** `connect_with_person` against a real creator-mode profile ("Message / Pending" primary, Connect in the "More" menu) returned `status=pending, note_sent=true` from the editable-install server on `feat/create-post-tool`. The deeplink path works in practice, not just on paper.
 - **Verify before trusting any branch:**
   ```bash
   git merge-base --is-ancestor 6519f11 HEAD && echo "OK: connect-fix present" || echo "MISSING connect-fix"
