@@ -68,7 +68,21 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `search_people` | Search for people by keywords, location, connection degree (1st/2nd/3rd), and current company | working |
 | `get_job_details` | Get detailed information about a specific job posting | working |
 | `get_feed` | Get recent posts from the authenticated user's home feed | working |
+| `get_post_comments` | List commenters (name, headline, profile, text) on a specific post | working |
+| `create_post` | **WRITE / side-effecting** — publish a text post to the feed (gated on `confirm_post`) | working |
+| `comment_on_post` | **WRITE / side-effecting** — comment on a post, or reply under a specific commenter (`reply_to_profile`); gated on `confirm_comment`, publication verified before returning `commented:true` | working |
+| `react_to_post` | **WRITE / side-effecting** — react (like/celebrate/support/love/insightful/funny) to a post; gated on `confirm_react`, idempotent-safe on already-reacted posts | working |
 | `close_session` | Close browser session and clean up resources | working |
+
+> **Write-tool safety & rate discipline.** `create_post`, `comment_on_post`, and
+> `react_to_post` are public, side-effecting actions on your own account. They all
+> default to a dry run (`confirm_*=false`) that previews without publishing; you must
+> pass `confirm_*=true` to actually write. Comments and reactions are permanent and
+> visible — keep a **conservative engagement cap, tracked separately from the
+> connection-request cap**: as a working guideline no more than **~15–20 comments and
+> ~30 reactions per week**, spread across days, and **stop immediately on any captcha
+> or warning interstitial**. These caps are engagement-warming limits and are
+> deliberately lower and independent of any connect/DM volume limits.
 
 <br/>
 <br/>

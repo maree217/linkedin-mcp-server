@@ -4099,6 +4099,167 @@ class LinkedInExtractor:
             commented=True,
         )
 
+    # Reaction types LinkedIn exposes in the flyout, keyed to the lowercase
+    # token that appears in each reaction button's aria-label ("React Like",
+    # "React Celebrate", ...). The verb "React" is locale-dependent; the
+    # reaction *name* is the only per-type signal, so this is matched as a
+    # documented, guarded exception to the locale-independence rule.
+    _REACTIONS = ("like", "celebrate", "support", "love", "insightful", "funny")
+
+    async def react_to_post(
+        self,
+        post_url: str,
+        *,
+        reaction: str = "like",
+        confirm_react: bool = False,
+    ) -> dict[str, Any]:
+        """React to a specific LinkedIn post with explicit confirmation gating.
+
+        Navigates to the post permalink and drives the social action bar via
+        browser automation. WRITE operation gated on confirm_react: with
+        confirm_react=False (the safe default) the react control is located and
+        its readiness reported, but no reaction is applied — a dry run. Set
+        confirm_react=True to actually react.
+
+        Idempotent-safe: if the post already carries the requested reaction the
+        call is a no-op returning status="already_reacted" (never crashes or
+        double-reacts).
+
+        Args:
+            post_url: Permalink of the post (a /feed/update/urn:li:activity:...
+                or /posts/<slug> URL, e.g. from get_feed).
+            reaction: One of like, celebrate, support, love, insightful, funny.
+            confirm_react: Must be True to apply the reaction. False is a dry run.
+        """
+        reaction = (reaction or "like").strip().lower()
+        if reaction not in self._REACTIONS:
+            return {
+                "url": post_url,
+                "status": "invalid_reaction",
+                "message": f"'{reaction}' is not one of {', '.join(self._REACTIONS)}.",
+                "reacted": False,
+            }
+
+        await self._navigate_to_page(post_url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug("Post page did not fully load before reacting")
+
+        await handle_modal_close(self._page)
+
+        # Locate the primary react toggle in the post's own social action bar.
+        # aria-pressed="true" is the locale-independent already-reacted signal.
+        state = await self._page.evaluate(
+            """() => {
+                const btns = Array.from(document.querySelectorAll(
+                    'button[aria-label], [role="button"][aria-label]'));
+                // The main react toggle carries an aria-label mentioning "react".
+                const toggle = btns.find(b =>
+                    (b.getAttribute('aria-label') || '').toLowerCase()
+                        .includes('react'));
+                if (!toggle) return {found: false};
+                return {
+                    found: true,
+                    pressed: toggle.getAttribute('aria-pressed') === 'true',
+                    label: (toggle.getAttribute('aria-label') || '').toLowerCase(),
+                };
+            }"""
+        )
+        if not state.get("found"):
+            return {
+                "url": self._page.url,
+                "status": "react_control_unavailable",
+                "message": "Could not find the react control on this post.",
+                "reacted": False,
+            }
+
+        already = bool(state.get("pressed")) and reaction in (state.get("label") or "")
+        if already:
+            return {
+                "url": self._page.url,
+                "status": "already_reacted",
+                "message": f"Post already carries the '{reaction}' reaction.",
+                "reacted": True,
+            }
+
+        if not confirm_react:
+            return {
+                "url": self._page.url,
+                "status": "confirmation_required",
+                "message": f"React control located; '{reaction}' ready to apply. "
+                "Set confirm_react=true to react.",
+                "reacted": False,
+            }
+
+        # Apply the reaction. "like" is the toggle's default action, so a direct
+        # click suffices. Other reactions live in a flyout revealed on hover of
+        # the toggle; reveal it with pointer events, then click the matching
+        # "React <Reaction>" button. JS-click throughout (patchright blocks the
+        # normal .click() on non-actionable nodes).
+        reacted = await self._page.evaluate(
+            """(wanted) => {
+                const norm = (b) => (b.getAttribute('aria-label') || '')
+                    .toLowerCase();
+                const btns = () => Array.from(document.querySelectorAll(
+                    'button[aria-label], [role="button"][aria-label]'));
+                const toggle = btns().find(b => norm(b).includes('react'));
+                if (!toggle) return false;
+                if (wanted === 'like') { toggle.click(); return true; }
+                // Reveal the reactions flyout over the toggle.
+                for (const type of ['pointerover', 'pointerenter',
+                    'mouseover', 'mouseenter']) {
+                    toggle.dispatchEvent(new MouseEvent(type,
+                        {bubbles: true, cancelable: true}));
+                }
+                const target = btns().find(b => {
+                    const l = norm(b);
+                    return l.includes('react') && l.includes(wanted);
+                });
+                if (!target) return false;
+                target.click();
+                return true;
+            }""",
+            reaction,
+        )
+        if not reacted:
+            return {
+                "url": self._page.url,
+                "status": "reaction_unavailable",
+                "message": f"Could not apply the '{reaction}' reaction "
+                "(the reaction flyout may not have opened).",
+                "reacted": False,
+            }
+
+        # Verify the toggle now reads as pressed — a click alone is not proof.
+        await asyncio.sleep(1.0)
+        confirmed = await self._page.evaluate(
+            """() => {
+                const t = Array.from(document.querySelectorAll(
+                    'button[aria-label], [role="button"][aria-label]'))
+                    .find(b => (b.getAttribute('aria-label') || '')
+                        .toLowerCase().includes('react'));
+                return !!t && t.getAttribute('aria-pressed') === 'true';
+            }"""
+        )
+        if not confirmed:
+            return {
+                "url": self._page.url,
+                "status": "reaction_unconfirmed",
+                "message": "Reaction was clicked but could not be confirmed as "
+                "applied — verify manually before retrying.",
+                "reacted": False,
+            }
+
+        return {
+            "url": self._page.url,
+            "status": "reacted",
+            "message": f"Reacted '{reaction}' on the post.",
+            "reacted": True,
+        }
+
     async def get_post_comments(
         self,
         post_url: str,

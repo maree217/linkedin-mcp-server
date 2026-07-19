@@ -335,3 +335,82 @@ def register_feed_tools(
                 raise_tool_error(relogin_exc, "comment_on_post")
         except Exception as e:
             raise_tool_error(e, "comment_on_post")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="React To Post",
+        annotations={"destructiveHint": True, "openWorldHint": True},
+        tags={"feed", "actions"},
+        exclude_args=["extractor"],
+    )
+    async def react_to_post(
+        post_url: Annotated[str, Field(min_length=1)],
+        confirm_react: bool,
+        ctx: Context,
+        reaction: Annotated[
+            str,
+            Field(pattern="^(like|celebrate|support|love|insightful|funny)$"),
+        ] = "like",
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        React (like / celebrate / support / love / insightful / funny) to a post.
+
+        This is a WRITE operation gated on confirm_react: with
+        confirm_react=False (the safe default to preview) the react control is
+        located and its readiness reported, but no reaction is applied — a dry
+        run returning status="confirmation_required". Set confirm_react=True to
+        actually react.
+
+        Idempotent-safe: if the post already carries the requested reaction it
+        is a no-op returning status="already_reacted". On a real react the write
+        is verified — reacted=True is returned only once the toggle reads as
+        pressed, never merely because it was clicked.
+
+        Args:
+            post_url: Permalink of the post to react to — e.g. the
+                /feed/update/urn:li:activity:... or /posts/<slug> URLs that
+                get_feed returns under references["feed"].
+            confirm_react: Must be True to apply the reaction. False does a dry
+                run.
+            ctx: FastMCP context for progress reporting.
+            reaction: One of like (default), celebrate, support, love,
+                insightful, funny.
+
+        Returns:
+            Dict with url, status, message, and reacted (bool). Statuses:
+            "reacted", "already_reacted", "confirmation_required",
+            "invalid_reaction", "react_control_unavailable",
+            "reaction_unavailable", "reaction_unconfirmed".
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="react_to_post"
+            )
+            logger.info(
+                "Reacting to post (confirm_react=%s, reaction=%s)",
+                confirm_react,
+                reaction,
+            )
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Locating react control"
+            )
+
+            result = await extractor.react_to_post(
+                post_url,
+                reaction=reaction,
+                confirm_react=confirm_react,
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "react_to_post")
+        except Exception as e:
+            raise_tool_error(e, "react_to_post")  # NoReturn

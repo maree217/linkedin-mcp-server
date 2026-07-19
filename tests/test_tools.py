@@ -42,6 +42,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.extract_feed = AsyncMock(return_value=ExtractedSection(text="", references=[]))
     mock.create_post = AsyncMock(return_value=scrape_result)
     mock.comment_on_post = AsyncMock(return_value=scrape_result)
+    mock.react_to_post = AsyncMock(return_value=scrape_result)
     return mock
 
 
@@ -1393,6 +1394,89 @@ class TestFeedTools:
             confirm_comment=True,
             reply_to_profile="https://www.linkedin.com/in/some-commenter/",
         )
+
+    async def test_react_to_post_dry_run(self, mock_context):
+        """confirm_react=False is a dry run: the extractor is called with the
+        flag False and reaction forwarded, and no reaction is applied."""
+        expected = {
+            "url": "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+            "status": "confirmation_required",
+            "message": "React control located; 'like' ready to apply. "
+            "Set confirm_react=true to react.",
+            "reacted": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "react_to_post")
+        result = await tool_fn(
+            "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+            False,
+            mock_context,
+            reaction="celebrate",
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "confirmation_required"
+        assert result["reacted"] is False
+        mock_extractor.react_to_post.assert_awaited_once_with(
+            "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+            reaction="celebrate",
+            confirm_react=False,
+        )
+
+    async def test_react_to_post_confirmed(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+            "status": "reacted",
+            "message": "Reacted 'like' on the post.",
+            "reacted": True,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "react_to_post")
+        result = await tool_fn(
+            "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+            True,
+            mock_context,
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "reacted"
+        assert result["reacted"] is True
+        mock_extractor.react_to_post.assert_awaited_once_with(
+            "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+            reaction="like",
+            confirm_react=True,
+        )
+
+    async def test_react_to_post_rejects_invalid_reaction(self, mock_context):
+        """An unsupported reaction is rejected by the Field pattern."""
+        from pydantic import ValidationError
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        with pytest.raises(ValidationError):
+            await mcp.call_tool(
+                "react_to_post",
+                {
+                    "post_url": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+                    "confirm_react": False,
+                    "reaction": "angry",
+                },
+            )
 
     async def test_comment_on_post_rejects_empty_text(self, mock_context):
         """Empty comment body is rejected by Field(min_length=1) validation."""
