@@ -190,9 +190,7 @@ def register_feed_tools(
         text: Annotated[str, Field(min_length=1, max_length=3000)],
         confirm_post: bool,
         ctx: Context,
-        visibility: Annotated[
-            str, Field(pattern="^(anyone|connections)$")
-        ] = "anyone",
+        visibility: Annotated[str, Field(pattern="^(anyone|connections)$")] = "anyone",
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -266,16 +264,23 @@ def register_feed_tools(
         text: Annotated[str, Field(min_length=1, max_length=1250)],
         confirm_comment: bool,
         ctx: Context,
+        reply_to_profile: Annotated[str | None, Field()] = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
-        Publish a comment on a specific LinkedIn post.
+        Publish a comment (or threaded reply) on a specific LinkedIn post.
 
         This is a WRITE operation gated on confirm_comment: with
         confirm_comment=False (the safe default to preview) the comment box is
         opened and the text entered, but nothing is published — a dry run
         returning status="confirmation_required". Set confirm_comment=True to
         actually publish the comment.
+
+        On a real publish the write is verified end-to-end: commented=True is
+        returned only once the comment is observed in the thread, never merely
+        because the submit button was clicked. If the submit fires but the
+        comment cannot be confirmed, status="comment_unconfirmed" is returned
+        (commented=False) — check before retrying to avoid a duplicate.
 
         Args:
             post_url: Permalink of the post to comment on — e.g. the
@@ -285,20 +290,27 @@ def register_feed_tools(
                 comment limit).
             confirm_comment: Must be True to publish. False does a dry run.
             ctx: FastMCP context for progress reporting.
+            reply_to_profile: Optional — a commenter's /in/ URL or bare
+                username. When set, the text is posted as a threaded reply
+                under that person's comment rather than as a top-level comment.
+                The target comment must already be loaded on the post; call
+                get_post_comments first to surface it.
 
         Returns:
             Dict with url, status, message, and commented (bool). Statuses:
-            "commented", "confirmation_required", "comment_box_unavailable",
-            "comment_button_unavailable".
+            "commented", "confirmation_required", "comment_unconfirmed",
+            "comment_box_unavailable", "comment_button_unavailable",
+            "reply_target_unresolved", "reply_target_unavailable".
         """
         try:
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="comment_on_post"
             )
             logger.info(
-                "Commenting on post (confirm_comment=%s, length=%d)",
+                "Commenting on post (confirm_comment=%s, length=%d, reply=%s)",
                 confirm_comment,
                 len(text),
+                bool(reply_to_profile),
             )
 
             await ctx.report_progress(
@@ -309,6 +321,7 @@ def register_feed_tools(
                 post_url,
                 text,
                 confirm_comment=confirm_comment,
+                reply_to_profile=reply_to_profile,
             )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")

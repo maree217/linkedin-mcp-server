@@ -3829,19 +3829,124 @@ class LinkedInExtractor:
         except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
             logger.debug("Could not cleanly clear the comment box: %s", exc)
 
+    @staticmethod
+    def _profile_slug(value: str) -> str:
+        """Reduce a /in/ URL or bare username to its lowercase vanity slug.
+
+        Accepts ``https://www.linkedin.com/in/some-user/``, ``/in/some-user``,
+        or ``some-user`` and returns ``some-user``. Returns "" if no slug can
+        be extracted.
+        """
+        v = (value or "").strip()
+        if "/in/" in v:
+            v = v.split("/in/", 1)[1]
+        v = v.split("?")[0].split("#")[0].strip("/")
+        return v.split("/")[0].lower()
+
+    async def _comment_published(self, text: str) -> bool:
+        """True once a comment block whose body contains ``text`` is in the DOM.
+
+        Post-submit verification for comment_on_post: LinkedIn renders the just-
+        published comment into the thread, so matching our own submitted text
+        (content-based, hence locale-independent) confirms the write actually
+        landed rather than trusting that the submit button was merely clicked.
+        Long comments get truncated with a "…see more" toggle, so we match on a
+        whitespace-normalised prefix of the submitted text.
+        """
+        try:
+            return await self._page.evaluate(
+                """(expected) => {
+                    const norm = (s) => (s || '').replace(/\\s+/g, ' ')
+                        .trim().toLowerCase();
+                    const want = norm(expected).slice(0, 60);
+                    if (!want) return false;
+                    const blocks = Array.from(document.querySelectorAll(
+                        'article.comments-comment-entity, '
+                        + 'div.comments-comment-entity, '
+                        + 'article[class*="comments-comment-item"]'
+                    ));
+                    return blocks.some(b => {
+                        const bodyEl = b.querySelector(
+                            '.comments-comment-item__main-content, '
+                            + '.update-components-text, '
+                            + '.comments-comment-item-content-body');
+                        const t = norm(bodyEl ? bodyEl.innerText : b.innerText);
+                        return t.includes(want);
+                    });
+                }""",
+                text,
+            )
+        except Exception as exc:  # noqa: BLE001 - verification is best-effort
+            logger.debug("Could not verify comment publication: %s", exc)
+            return False
+
+    async def _open_reply_editor(self, target_slug: str) -> bool:
+        """Reveal + focus the reply editor under a specific commenter's comment.
+
+        Scans loaded comment blocks for the one whose *author* anchor matches
+        ``target_slug`` (matched against the comment-header region only, never
+        the body, so an @mention in the comment text can't be mistaken for the
+        author), clicks that block's Reply trigger, and returns True if a reply
+        editor opened. Author-anchor scoping mirrors the get_post_comments fix.
+        """
+        return await self._page.evaluate(
+            """(slug) => {
+                const authorSlug = (b) => {
+                    const meta = b.querySelector(
+                        '.comments-comment-meta, .comments-comment-item__meta, '
+                        + 'header') || b;
+                    const a = meta.querySelector('a[href*="/in/"]');
+                    if (!a) return '';
+                    const href = a.getAttribute('href') || '';
+                    const i = href.indexOf('/in/');
+                    if (i === -1) return '';
+                    return href.slice(i + 4).split(/[/?#]/)[0].toLowerCase();
+                };
+                const blocks = Array.from(document.querySelectorAll(
+                    'article.comments-comment-entity, '
+                    + 'div.comments-comment-entity, '
+                    + 'article[class*="comments-comment-item"]'
+                ));
+                const block = blocks.find(b => authorSlug(b) === slug);
+                if (!block) return false;
+                const rbtn = Array.from(
+                    block.querySelectorAll('button, [role="button"]')
+                ).find(x => {
+                    const l = ((x.getAttribute('aria-label') || '') + ' '
+                        + (x.innerText || '')).trim().toLowerCase();
+                    return l === 'reply' || l.startsWith('reply to')
+                        || l.includes('reply to');
+                });
+                if (!rbtn) return false;
+                rbtn.scrollIntoView({block: 'center'});
+                rbtn.click();
+                // The reply editor opens within this block; focus it.
+                const box = block.querySelector(
+                    'div[role="textbox"][contenteditable="true"], '
+                    + 'div.ql-editor[contenteditable="true"]');
+                if (box) { box.focus(); return true; }
+                return true;  // trigger clicked; editor may hydrate async
+            }""",
+            target_slug,
+        )
+
     async def comment_on_post(
         self,
         post_url: str,
         text: str,
         *,
         confirm_comment: bool,
+        reply_to_profile: str | None = None,
     ) -> dict[str, Any]:
         """Comment on a specific LinkedIn post with explicit confirmation gating.
 
         Navigates to the post permalink and drives the comment editor via
         browser automation. WRITE operation gated on confirm_comment: with
         confirm_comment=False the comment box is opened and filled but the
-        comment is NOT published (a dry run).
+        comment is NOT published (a dry run). On a real publish the write is
+        verified end-to-end — the returned ``commented`` is True only once the
+        comment is observed in the thread, never merely because the submit
+        button was clicked.
 
         Args:
             post_url: Permalink of the post to comment on (e.g. a
@@ -3849,6 +3954,10 @@ class LinkedInExtractor:
                 the entries get_feed returns under references["feed"]).
             text: Comment body (validated 1-1250 chars at the tool layer).
             confirm_comment: Must be True to publish. False does a dry run.
+            reply_to_profile: When set (a /in/ URL or bare username), post as a
+                threaded reply under that commenter's comment instead of a top-
+                level comment. The target comment must be loaded on the page;
+                callers should surface it first (get_post_comments).
         """
         await self._navigate_to_page(post_url)
         await detect_rate_limit(self._page)
@@ -3860,41 +3969,59 @@ class LinkedInExtractor:
 
         await handle_modal_close(self._page)
 
-        # Open + focus the comment editor. On a post permalink the comment box
-        # is usually present but unfocused; some layouts require clicking the
-        # "Comment" action first. Retry through React hydration: each pass tries
-        # to focus an existing comment editor, else clicks a Comment trigger to
-        # reveal it. ARIA/contenteditable selectors only (no layout classes).
+        target_slug = self._profile_slug(reply_to_profile) if reply_to_profile else ""
+        if reply_to_profile and not target_slug:
+            return self._comment_action_result(
+                self._page.url,
+                "reply_target_unresolved",
+                f"Could not parse a /in/ profile slug from '{reply_to_profile}'.",
+            )
+
+        # Open + focus the target editor. For a reply, locate the commenter's
+        # comment and open its Reply editor; for a top-level comment, focus the
+        # post's own comment box (clicking a Comment trigger first if needed).
+        # Retry through React hydration. ARIA/contenteditable selectors only.
         editor_ready = False
         for _ in range(20):
-            editor_ready = await self._page.evaluate(
-                """() => {
-                    const boxes = Array.from(document.querySelectorAll(
-                        'div[role="textbox"][contenteditable="true"],'
-                        + 'div.ql-editor[contenteditable="true"]'
-                    ));
-                    const commentBox = boxes.find(b =>
-                        (b.getAttribute('aria-label') || '')
-                            .toLowerCase().includes('comment')
-                    ) || boxes[0];
-                    if (commentBox) { commentBox.focus(); return true; }
-                    const trigger = Array.from(
-                        document.querySelectorAll('button, [role="button"]')
-                    ).find(b => {
-                        const l = ((b.getAttribute('aria-label') || '') + ' '
-                            + (b.innerText || '')).trim().toLowerCase();
-                        return l === 'comment' || l === 'leave a comment'
-                            || l === 'add a comment';
-                    });
-                    if (trigger) trigger.click();
-                    return false;
-                }"""
-            )
+            if target_slug:
+                editor_ready = await self._open_reply_editor(target_slug)
+            else:
+                editor_ready = await self._page.evaluate(
+                    """() => {
+                        const boxes = Array.from(document.querySelectorAll(
+                            'div[role="textbox"][contenteditable="true"],'
+                            + 'div.ql-editor[contenteditable="true"]'
+                        ));
+                        const commentBox = boxes.find(b =>
+                            (b.getAttribute('aria-label') || '')
+                                .toLowerCase().includes('comment')
+                        ) || boxes[0];
+                        if (commentBox) { commentBox.focus(); return true; }
+                        const trigger = Array.from(
+                            document.querySelectorAll('button, [role="button"]')
+                        ).find(b => {
+                            const l = ((b.getAttribute('aria-label') || '') + ' '
+                                + (b.innerText || '')).trim().toLowerCase();
+                            return l === 'comment' || l === 'leave a comment'
+                                || l === 'add a comment';
+                        });
+                        if (trigger) trigger.click();
+                        return false;
+                    }"""
+                )
             if editor_ready:
                 break
             await asyncio.sleep(0.25)
 
         if not editor_ready:
+            if target_slug:
+                return self._comment_action_result(
+                    self._page.url,
+                    "reply_target_unavailable",
+                    "Could not find or open the Reply editor for commenter "
+                    f"'{target_slug}'. Ensure their comment is loaded on the "
+                    "post (call get_post_comments first).",
+                )
             return self._comment_action_result(
                 self._page.url,
                 "comment_box_unavailable",
@@ -3902,16 +4029,19 @@ class LinkedInExtractor:
             )
 
         # Type via page.keyboard so React sees real key events and enables Post.
+        # The reply editor is focused by _open_reply_editor; keyboard input goes
+        # to whichever contenteditable currently holds focus.
         await asyncio.sleep(0.1)
         await self._page.keyboard.type(text, delay=10)
         await asyncio.sleep(0.3)
 
+        action = "Reply" if target_slug else "Comment"
         if not confirm_comment:
             await self._clear_comment_box()
             return self._comment_action_result(
                 post_url,
                 "confirmation_required",
-                "Comment box opened and text entered. "
+                f"{action} editor opened and text entered. "
                 "Set confirm_comment=true to publish.",
             )
 
@@ -3921,7 +4051,7 @@ class LinkedInExtractor:
         # Deliberately NOT matching aria-label "Comment" — that is the action-bar
         # toggle, not the submit.
         await asyncio.sleep(0.5)
-        commented = await self._page.evaluate(
+        clicked = await self._page.evaluate(
             """() => {
                 const btn = Array.from(document.querySelectorAll('button')).find(b => {
                     if (b.disabled) return false;
@@ -3934,7 +4064,7 @@ class LinkedInExtractor:
                 return true;
             }"""
         )
-        if not commented:
+        if not clicked:
             await self._clear_comment_box()
             return self._comment_action_result(
                 self._page.url,
@@ -3943,11 +4073,29 @@ class LinkedInExtractor:
                 "be activated.",
             )
 
-        await asyncio.sleep(1.5)
+        # Verify the write actually landed — clicking the submit button is not
+        # proof of publication (the false-positive this replaces). Poll for the
+        # comment to appear in the thread before returning commented=True.
+        published = False
+        for _ in range(8):
+            await asyncio.sleep(1.0)
+            if await self._comment_published(text):
+                published = True
+                break
+
+        if not published:
+            return self._comment_action_result(
+                self._page.url,
+                "comment_unconfirmed",
+                "Submit was clicked but the comment could not be confirmed in "
+                "the thread. It may have failed to publish, or rendering was "
+                "delayed — verify manually before retrying to avoid a duplicate.",
+            )
+
         return self._comment_action_result(
             self._page.url,
             "commented",
-            "Comment published on the post.",
+            f"{action} published and confirmed in the thread.",
             commented=True,
         )
 
@@ -3997,7 +4145,7 @@ class LinkedInExtractor:
                 "() => document.querySelectorAll("
                 "'article.comments-comment-entity, "
                 "div.comments-comment-entity, "
-                "article[class*=\"comments-comment-item\"]').length"
+                'article[class*="comments-comment-item"]\').length'
             )
             if count >= max_comments:
                 break
@@ -4050,7 +4198,15 @@ class LinkedInExtractor:
                 const out = [];
                 const seen = new Set();
                 for (const b of blocks) {
-                    const link = b.querySelector('a[href*="/in/"]');
+                    // Author anchor lives in the comment header/meta region.
+                    // Scoping the /in/ lookup there (not the whole block) stops
+                    // an @mention inside the comment body — itself an /in/ link
+                    // — from being mis-read as the commenter's own profile.
+                    const meta = b.querySelector(
+                        '.comments-comment-meta, .comments-comment-item__meta, '
+                        + 'header');
+                    const link = (meta && meta.querySelector('a[href*="/in/"]'))
+                        || b.querySelector('a[href*="/in/"]');
                     const profile = link ? norm(link.getAttribute('href')) : '';
                     // Name: prefer explicit title node, else the profile link text.
                     let name = '';

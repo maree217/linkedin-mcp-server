@@ -121,6 +121,43 @@ class TestBuildJobSearchUrl:
         assert "sortBy=DD" in url
 
 
+class TestProfileSlug:
+    """_profile_slug reduces any commenter reference to its /in/ vanity slug."""
+
+    def test_full_url(self):
+        assert (
+            LinkedInExtractor._profile_slug(
+                "https://www.linkedin.com/in/some-user/"
+            )
+            == "some-user"
+        )
+
+    def test_relative_in_path(self):
+        assert LinkedInExtractor._profile_slug("/in/some-user") == "some-user"
+
+    def test_bare_username(self):
+        assert LinkedInExtractor._profile_slug("Some-User") == "some-user"
+
+    def test_strips_query_and_fragment(self):
+        assert (
+            LinkedInExtractor._profile_slug(
+                "https://www.linkedin.com/in/some-user/?trk=abc#foo"
+            )
+            == "some-user"
+        )
+
+    def test_url_with_trailing_subpath(self):
+        assert (
+            LinkedInExtractor._profile_slug(
+                "https://www.linkedin.com/in/some-user/recent-activity/"
+            )
+            == "some-user"
+        )
+
+    def test_empty(self):
+        assert LinkedInExtractor._profile_slug("") == ""
+
+
 @pytest.fixture
 def mock_page():
     """Create a mock Patchright page."""

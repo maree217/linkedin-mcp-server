@@ -1324,6 +1324,7 @@ class TestFeedTools:
             "https://www.linkedin.com/feed/update/urn:li:activity:123/",
             "Great point — fully agree.",
             confirm_comment=False,
+            reply_to_profile=None,
         )
 
     async def test_comment_on_post_publishes_when_confirmed(self, mock_context):
@@ -1355,6 +1356,42 @@ class TestFeedTools:
             "https://www.linkedin.com/feed/update/urn:li:activity:123/",
             "Sharp analysis — thanks for posting.",
             confirm_comment=True,
+            reply_to_profile=None,
+        )
+
+    async def test_comment_on_post_threads_reply_to_commenter(self, mock_context):
+        """reply_to_profile is forwarded to the extractor so the text is posted
+        as a threaded reply under that commenter rather than top-level."""
+        expected = {
+            "url": "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+            "status": "commented",
+            "message": "Reply published and confirmed in the thread.",
+            "commented": True,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "comment_on_post")
+        result = await tool_fn(
+            "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+            "Replying directly to your point.",
+            True,
+            mock_context,
+            reply_to_profile="https://www.linkedin.com/in/some-commenter/",
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "commented"
+        assert result["commented"] is True
+        mock_extractor.comment_on_post.assert_awaited_once_with(
+            "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+            "Replying directly to your point.",
+            confirm_comment=True,
+            reply_to_profile="https://www.linkedin.com/in/some-commenter/",
         )
 
     async def test_comment_on_post_rejects_empty_text(self, mock_context):
