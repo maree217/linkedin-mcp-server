@@ -4046,19 +4046,33 @@ class LinkedInExtractor:
             )
 
         # Publish: JS-click the comment submit button (patchright actionability
-        # blocks a normal .click()). The submit reads "Post"/"Reply" or carries
-        # an aria-label of "Post comment"; the disabled empty state is skipped.
-        # Deliberately NOT matching aria-label "Comment" — that is the action-bar
-        # toggle, not the submit.
+        # blocks a normal .click()). Layouts differ:
+        #   • some expose a submit reading "Post"/"Reply" or aria-label
+        #     "Post comment";
+        #   • the post-permalink layout's submit is <button>Comment</button>
+        #     with NO aria-label, while the action-bar toggle is a *different*
+        #     button that DOES carry aria-label "Comment" plus the count.
+        # So a text==="comment" button is a valid submit ONLY when it has no
+        # aria-label (that reliably excludes the toggle). The disabled empty
+        # state is always skipped. Prefer the explicit submit; fall back to the
+        # bare "Comment" submit.
         await asyncio.sleep(0.5)
         clicked = await self._page.evaluate(
             """() => {
-                const btn = Array.from(document.querySelectorAll('button')).find(b => {
-                    if (b.disabled) return false;
-                    const t = (b.innerText || '').trim().toLowerCase();
-                    const al = (b.getAttribute('aria-label') || '').trim().toLowerCase();
-                    return t === 'post' || t === 'reply' || al === 'post comment';
-                });
+                const btns = Array.from(document.querySelectorAll('button'))
+                    .filter(b => !b.disabled);
+                const label = b =>
+                    (b.getAttribute('aria-label') || '').trim().toLowerCase();
+                const text = b => (b.innerText || '').trim().toLowerCase();
+                // 1) Explicit submit: "Post" / "Reply" / aria-label "Post comment".
+                let btn = btns.find(b =>
+                    text(b) === 'post' || text(b) === 'reply'
+                    || label(b) === 'post comment');
+                // 2) Fallback: a bare "Comment" submit with no aria-label (the
+                //    action-bar toggle always has aria-label "Comment", so this
+                //    can't match it).
+                if (!btn) btn = btns.find(b =>
+                    text(b) === 'comment' && !b.getAttribute('aria-label'));
                 if (!btn) return false;
                 btn.click();
                 return true;
@@ -4150,8 +4164,13 @@ class LinkedInExtractor:
 
         await handle_modal_close(self._page)
 
-        # Locate the primary react toggle in the post's own social action bar.
-        # aria-pressed="true" is the locale-independent already-reacted signal.
+        # Locate the primary react toggle in the post's own social action bar and
+        # read its reacted-state. Two layouts expose that state differently:
+        #   • aria-pressed="true"  (locale-independent — preferred), and/or
+        #   • the aria-label switches from "React <X>" (not reacted) to
+        #     "Reaction button state: <X>" (reacted) — the "state" marker is
+        #     English-only, so it's a documented fallback, not the primary.
+        # `reacted` here means the toggle already carries *some* reaction.
         state = await self._page.evaluate(
             """() => {
                 const btns = Array.from(document.querySelectorAll(
@@ -4161,10 +4180,13 @@ class LinkedInExtractor:
                     (b.getAttribute('aria-label') || '').toLowerCase()
                         .includes('react'));
                 if (!toggle) return {found: false};
+                const label = (toggle.getAttribute('aria-label') || '')
+                    .toLowerCase();
                 return {
                     found: true,
-                    pressed: toggle.getAttribute('aria-pressed') === 'true',
-                    label: (toggle.getAttribute('aria-label') || '').toLowerCase(),
+                    reacted: toggle.getAttribute('aria-pressed') === 'true'
+                        || label.includes('state'),
+                    label: label,
                 };
             }"""
         )
@@ -4176,7 +4198,7 @@ class LinkedInExtractor:
                 "reacted": False,
             }
 
-        already = bool(state.get("pressed")) and reaction in (state.get("label") or "")
+        already = bool(state.get("reacted")) and reaction in (state.get("label") or "")
         if already:
             return {
                 "url": self._page.url,
@@ -4233,7 +4255,9 @@ class LinkedInExtractor:
                 "reacted": False,
             }
 
-        # Verify the toggle now reads as pressed — a click alone is not proof.
+        # Verify the toggle now reads as reacted — a click alone is not proof.
+        # Accept either signal (aria-pressed OR the "state" aria-label form),
+        # matching the pre-click read above.
         await asyncio.sleep(1.0)
         confirmed = await self._page.evaluate(
             """() => {
@@ -4241,7 +4265,10 @@ class LinkedInExtractor:
                     'button[aria-label], [role="button"][aria-label]'))
                     .find(b => (b.getAttribute('aria-label') || '')
                         .toLowerCase().includes('react'));
-                return !!t && t.getAttribute('aria-pressed') === 'true';
+                if (!t) return false;
+                const label = (t.getAttribute('aria-label') || '').toLowerCase();
+                return t.getAttribute('aria-pressed') === 'true'
+                    || label.includes('state');
             }"""
         )
         if not confirmed:
