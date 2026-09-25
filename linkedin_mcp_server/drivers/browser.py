@@ -6,9 +6,12 @@ context. Implements a singleton pattern for browser reuse across tool calls with
 automatic profile persistence.
 """
 
+import asyncio
+from contextlib import asynccontextmanager
 import logging
 import os
 from pathlib import Path
+from typing import AsyncIterator
 
 from linkedin_mcp_server.common_utils import secure_mkdir
 from linkedin_mcp_server.core import (
@@ -48,6 +51,16 @@ DEFAULT_PROFILE_DIR = Path.home() / ".linkedin-mcp" / "profile"
 _browser: BrowserManager | None = None
 _browser_cookie_export_path: Path | None = None
 _headless: bool = True
+
+# Idle-shutdown: close the browser after a period of no tool calls, reusing the
+# same close_browser() path as the close_session tool so the persistent profile
+# on disk is always preserved. The next tool call relaunches it lazily via
+# get_or_create_browser(), exactly as happens after close_session today.
+IDLE_SECONDS_ENV_VAR = "LINKEDIN_BROWSER_IDLE_SECONDS"
+DEFAULT_IDLE_SECONDS = 600.0
+
+_idle_task: "asyncio.Task[None] | None" = None
+_in_flight_calls: int = 0
 
 
 def _debug_skip_checkpoint_restart() -> bool:
@@ -528,9 +541,87 @@ async def get_or_create_browser(
     return _browser
 
 
+def _idle_timeout_seconds() -> float:
+    """Resolve the idle-close timeout from LINKEDIN_BROWSER_IDLE_SECONDS."""
+    raw = os.getenv(IDLE_SECONDS_ENV_VAR, "").strip()
+    if not raw:
+        return DEFAULT_IDLE_SECONDS
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid %s=%r; falling back to default %.0fs",
+            IDLE_SECONDS_ENV_VAR,
+            raw,
+            DEFAULT_IDLE_SECONDS,
+        )
+        return DEFAULT_IDLE_SECONDS
+
+
+def _cancel_idle_timer() -> None:
+    """Cancel any pending idle-close timer, if it isn't the running task itself."""
+    global _idle_task
+    task = _idle_task
+    _idle_task = None
+    if task is not None and not task.done() and task is not asyncio.current_task():
+        task.cancel()
+
+
+def _schedule_idle_timer() -> None:
+    """(Re)start the idle-close countdown from now, if a browser is running."""
+    global _idle_task
+    _cancel_idle_timer()
+    if _browser is None:
+        return
+    seconds = _idle_timeout_seconds()
+    if seconds <= 0:
+        return
+    _idle_task = asyncio.create_task(
+        _idle_timeout_worker(seconds), name="linkedin-browser-idle-timeout"
+    )
+
+
+async def _idle_timeout_worker(seconds: float) -> None:
+    try:
+        await asyncio.sleep(seconds)
+    except asyncio.CancelledError:
+        return
+    if _in_flight_calls > 0 or _browser is None:
+        return
+    logger.info(
+        "Closing LinkedIn browser after %.0fs of inactivity (%s)",
+        seconds,
+        IDLE_SECONDS_ENV_VAR,
+    )
+    await close_browser()
+
+
+@asynccontextmanager
+async def track_tool_call() -> AsyncIterator[None]:
+    """Mark an MCP tool call as in-flight for the idle-close watchdog.
+
+    Cancels any pending idle-close timer for the duration of the call so the
+    browser is never closed mid-call, then reschedules a fresh countdown once
+    the last in-flight call completes. Intended to wrap every tool call (see
+    ``SequentialToolExecutionMiddleware``), so the countdown always restarts
+    from the end of the most recent tool call.
+    """
+    global _in_flight_calls
+    _in_flight_calls += 1
+    _cancel_idle_timer()
+    try:
+        yield
+    finally:
+        _in_flight_calls = max(0, _in_flight_calls - 1)
+        if _in_flight_calls == 0:
+            _schedule_idle_timer()
+
+
 async def close_browser() -> None:
     """Close the browser and cleanup resources."""
     global _browser, _browser_cookie_export_path
+
+    _cancel_idle_timer()
 
     browser = _browser
     cookie_export_path = _browser_cookie_export_path
@@ -608,7 +699,11 @@ async def check_rate_limit() -> None:
 
 def reset_browser_for_testing() -> None:
     """Reset global browser state for test isolation."""
-    global _browser, _browser_cookie_export_path, _headless
+    global _browser, _browser_cookie_export_path, _headless, _idle_task, _in_flight_calls
+    if _idle_task is not None and not _idle_task.done():
+        _idle_task.cancel()
+    _idle_task = None
+    _in_flight_calls = 0
     _browser = None
     _browser_cookie_export_path = None
     _headless = True

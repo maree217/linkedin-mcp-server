@@ -11,6 +11,8 @@ import mcp.types as mt
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
+from linkedin_mcp_server.drivers.browser import track_tool_call
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,7 +64,8 @@ class SequentialToolExecutionMiddleware(Middleware):
             )
             hold_started = time.perf_counter()
             try:
-                return await call_next(context)
+                async with track_tool_call():
+                    return await call_next(context)
             finally:
                 hold_seconds = time.perf_counter() - hold_started
                 logger.debug(
