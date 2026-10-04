@@ -6,10 +6,12 @@ with configurable section selection.
 """
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from fastmcp import Context, FastMCP
 
+from linkedin_mcp_server import warehouse_client
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
@@ -20,6 +22,20 @@ from linkedin_mcp_server.scraping.extractor import _RATE_LIMITED_MSG
 from linkedin_mcp_server.scraping.link_metadata import Reference
 
 logger = logging.getLogger(__name__)
+
+
+def _capture_age_hours(occurred_at: str | None) -> float | None:
+    """Return hours elapsed since an ISO-8601 occurred_at timestamp, or None."""
+    if not occurred_at:
+        return None
+    try:
+        ts = datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    delta = datetime.now(timezone.utc) - ts
+    return delta.total_seconds() / 3600.0
 
 
 def register_company_tools(
@@ -38,6 +54,8 @@ def register_company_tools(
         company_name: str,
         ctx: Context,
         sections: str | None = None,
+        prefer_cache: bool = False,
+        max_age_hours: int = 168,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -51,6 +69,14 @@ def register_company_tools(
                 Available sections: posts, jobs
                 Examples: "posts", "posts,jobs"
                 Default (None) scrapes only the about page.
+            prefer_cache: When True, first check companion-api's warehouse for a
+                previously captured version of this company (no live browser
+                navigation). If a capture exists and is within max_age_hours,
+                it is returned immediately. Otherwise falls through to the
+                normal live-scrape path below. Default False preserves
+                existing behaviour exactly (always live-scrapes).
+            max_age_hours: Maximum age (in hours) of a cached capture to accept
+                when prefer_cache is True. Default 168 (7 days).
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
@@ -64,7 +90,22 @@ def register_company_tools(
             numeric id LinkedIn's people-search uses in its currentCompany
             URL facet; plain-text company names are silently ignored by
             that facet.
+
+            When prefer_cache produced a hit, the dict additionally carries
+            {"source": "companion_capture", "captured_at": <iso timestamp>}.
         """
+        if prefer_cache:
+            cached = await warehouse_client.fetch_captured_company(company_name)
+            if cached and cached.get("found"):
+                age_hours = _capture_age_hours(cached.get("occurred_at"))
+                if age_hours is not None and age_hours <= max_age_hours:
+                    payload = cached.get("payload") or {}
+                    return {
+                        **payload,
+                        "source": "companion_capture",
+                        "captured_at": cached.get("occurred_at"),
+                    }
+
         try:
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="get_company_profile"

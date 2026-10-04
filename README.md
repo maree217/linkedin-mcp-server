@@ -72,7 +72,17 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `create_post` | **WRITE / side-effecting** — publish a text post to the feed (gated on `confirm_post`) | working |
 | `comment_on_post` | **WRITE / side-effecting** — comment on a post, or reply under a specific commenter (`reply_to_profile`); gated on `confirm_comment`, publication verified before returning `commented:true` | working |
 | `react_to_post` | **WRITE / side-effecting** — react (like/celebrate/support/love/insightful/funny) to a post; gated on `confirm_react`, idempotent-safe on already-reacted posts | working |
+| `get_captured_company` | Read a previously captured company page from the optional companion-api sidecar (no browser); returns `{available: false}` if unreachable | working |
+| `get_captured_people` | Read companion-captured stakeholders for a company/domain from companion-api | working |
+| `list_recent_captures` | List the most recent companion-api captures | working |
 | `close_session` | Close browser session and clean up resources | working |
+
+> **Optional warehouse cache (companion-api).** The `get_captured_*` / `list_recent_captures`
+> tools, and `prefer_cache=true` / `max_age_hours` (default 168) on `get_company_profile` and
+> `get_person_profile`, read from a local companion-api sidecar. Configure with
+> `COMPANION_API_URL` (default `http://127.0.0.1:7100`) and `COMPANION_API_TOKEN`. Every call
+> fails soft: if the sidecar is down or the token is unset, tools return `{available: false}`
+> or fall through to a live scrape.
 
 > **Write-tool safety & rate discipline.** `create_post`, `comment_on_post`, and
 > `react_to_post` are public, side-effecting actions on your own account. They all

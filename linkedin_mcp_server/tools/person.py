@@ -6,12 +6,14 @@ with configurable section selection.
 """
 
 import logging
+from datetime import datetime, timezone
 from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
+from linkedin_mcp_server import warehouse_client
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
@@ -21,6 +23,66 @@ from linkedin_mcp_server.scraping import parse_person_sections
 from linkedin_mcp_server.scraping.extractor import FilterValidationError
 
 logger = logging.getLogger(__name__)
+
+
+def _capture_age_hours(occurred_at: str | None) -> float | None:
+    """Return hours elapsed since an ISO-8601 occurred_at timestamp, or None."""
+    if not occurred_at:
+        return None
+    try:
+        ts = datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    delta = datetime.now(timezone.utc) - ts
+    return delta.total_seconds() / 3600.0
+
+
+async def _find_cached_person(
+    linkedin_username: str, max_age_hours: int
+) -> dict[str, Any] | None:
+    """Best-effort lookup of a companion-captured person by LinkedIn username.
+
+    companion-api's /v1/companion/people endpoint is indexed by company/domain,
+    not by person. We fetch recent captures' companies and check each one's
+    captured people list for a linkedin_url matching this username. This is a
+    soft, best-effort cache lookup -- any failure or miss returns None so the
+    caller falls through to a live scrape.
+    """
+    recent = await warehouse_client.fetch_recent_captures(limit=20)
+    if not recent:
+        return None
+
+    seen_companies: set[str] = set()
+    for capture in recent.get("captures", []):
+        company = capture.get("target_name")
+        domain = capture.get("domain")
+        key = f"{company or ''}::{domain or ''}"
+        if key in seen_companies or (not company and not domain):
+            continue
+        seen_companies.add(key)
+
+        people_result = await warehouse_client.fetch_captured_people(
+            company=company, domain=domain
+        )
+        if not people_result:
+            continue
+
+        for person in people_result.get("people", []):
+            linkedin_url = person.get("linkedin_url") or ""
+            if linkedin_username not in linkedin_url:
+                continue
+            age_hours = _capture_age_hours(person.get("discovered_at"))
+            if age_hours is not None and age_hours > max_age_hours:
+                continue
+            return {
+                **person,
+                "source": "companion_capture",
+                "captured_at": person.get("discovered_at"),
+            }
+
+    return None
 
 
 def register_person_tools(
@@ -40,6 +102,8 @@ def register_person_tools(
         ctx: Context,
         sections: str | None = None,
         max_scrolls: Annotated[int, Field(ge=1, le=50)] | None = None,
+        prefer_cache: bool = False,
+        max_age_hours: int = 168,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -62,13 +126,32 @@ def register_person_tools(
                 posts/comments. Increase when a profile has many items in a section
                 (e.g., 30+ certifications, max_scrolls=20). To avoid slowing down
                 other sections, request heavy sections in a separate call.
+            prefer_cache: When True, first check companion-api's warehouse for a
+                previously captured version of this person (no live browser
+                navigation), matched by linkedin_username against captured
+                stakeholders' linkedin_url. If a match exists and is within
+                max_age_hours, it is returned immediately. Otherwise falls
+                through to the normal live-scrape path below. Default False
+                preserves existing behaviour exactly (always live-scrapes).
+            max_age_hours: Maximum age (in hours) of a cached capture to accept
+                when prefer_cache is True. Default 168 (7 days).
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
             Sections may be absent if extraction yielded no content for that page.
             Includes unknown_sections list when unrecognised names are passed.
             The LLM should parse the raw text in each section.
+
+            When prefer_cache produced a hit, the dict is instead
+            {source: "companion_capture", captured_at, name, title, email,
+            persona_type, linkedin_url, ...} -- the raw captured stakeholder
+            record, not the live-scrape shape.
         """
+        if prefer_cache:
+            cached_hit = await _find_cached_person(linkedin_username, max_age_hours)
+            if cached_hit is not None:
+                return cached_hit
+
         try:
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="get_person_profile"
