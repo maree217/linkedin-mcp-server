@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import shutil
 import stat
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,53 @@ def _harden_linkedin_tree(path: Path) -> None:
             p.chmod(_PRIVATE_DIR_MODE)
         if p.name == ".linkedin-mcp":
             return
+
+
+# Regenerable Chromium caches. Login state (Cookies, Local Storage, IndexedDB,
+# Login Data, ...) lives elsewhere in the profile and is never touched.
+_PRUNABLE_CACHE_DIRS = (
+    "Cache",
+    "Code Cache",
+    "GPUCache",
+    "GraphiteDawnCache",
+    "DawnWebGPUCache",
+    "DawnGraphiteCache",
+    "component_crx_cache",
+    "ShaderCache",
+    "GrShaderCache",
+)
+
+_CACHE_LIMIT_ARGS = (
+    ("--disk-cache-size=", "--disk-cache-size=52428800"),
+    ("--media-cache-size=", "--media-cache-size=10485760"),
+)
+
+
+def _dir_size(path: Path) -> int:
+    total = 0
+    for p in path.rglob("*"):
+        try:
+            if p.is_file() and not p.is_symlink():
+                total += p.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def prune_profile_caches(user_data_dir: Path) -> int:
+    """Delete regenerable Chromium cache dirs from a profile; return bytes freed."""
+    root = Path(user_data_dir)
+    if not root.is_dir():
+        return 0
+    freed = 0
+    for base in (root, root / "Default"):
+        for name in _PRUNABLE_CACHE_DIRS:
+            target = base / name
+            if target.is_symlink() or not target.is_dir():
+                continue
+            freed += _dir_size(target)
+            shutil.rmtree(target, ignore_errors=True)
+    return freed
 
 
 class BrowserManager:
@@ -93,6 +141,10 @@ class BrowserManager:
             secure_mkdir(Path(self.user_data_dir))
             _harden_linkedin_tree(Path(self.user_data_dir))
 
+            freed = prune_profile_caches(Path(self.user_data_dir))
+            if freed:
+                logger.info("Pruned %.1f MB of browser caches at launch", freed / 1e6)
+
             context_options: dict[str, Any] = {
                 "headless": self.headless,
                 "slow_mo": self.slow_mo,
@@ -100,6 +152,12 @@ class BrowserManager:
                 **self.launch_options,
                 "locale": "en-US",
             }
+
+            args = list(context_options.get("args") or [])
+            for prefix, flag in _CACHE_LIMIT_ARGS:
+                if not any(a.startswith(prefix) for a in args):
+                    args.append(flag)
+            context_options["args"] = args
 
             if self.user_agent:
                 context_options["user_agent"] = self.user_agent
@@ -149,7 +207,8 @@ class BrowserManager:
             except Exception as exc:
                 logger.error("Error stopping playwright: %s", exc)
 
-        logger.info("Browser closed")
+        freed = prune_profile_caches(Path(self.user_data_dir))
+        logger.info("Browser closed (pruned %.1f MB of caches)", freed / 1e6)
 
     @property
     def page(self) -> Page:

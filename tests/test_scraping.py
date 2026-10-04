@@ -126,9 +126,7 @@ class TestProfileSlug:
 
     def test_full_url(self):
         assert (
-            LinkedInExtractor._profile_slug(
-                "https://www.linkedin.com/in/some-user/"
-            )
+            LinkedInExtractor._profile_slug("https://www.linkedin.com/in/some-user/")
             == "some-user"
         )
 

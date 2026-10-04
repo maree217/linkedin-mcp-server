@@ -144,6 +144,11 @@ The `@latest` tag ensures you always run the newest version — `uvx` checks PyP
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
 - `--logout` - Clear stored LinkedIn browser profile
+
+**Browser lifecycle:** the browser closes automatically after 3 minutes without a tool call
+(override with `LINKEDIN_BROWSER_IDLE_SECONDS`) and relaunches on the next call. Chromium's
+disk cache is capped at 50MB and regenerable cache directories are pruned on launch and close;
+login state in the profile is never touched.
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
 - `--tool-timeout SECONDS` - Per-tool MCP execution timeout in seconds (default: 180.0). Increase further for heavy scrapes / cold-start Chromium / slow networks.
 - `--user-data-dir PATH` - Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)

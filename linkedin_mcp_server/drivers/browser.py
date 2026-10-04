@@ -57,7 +57,7 @@ _headless: bool = True
 # on disk is always preserved. The next tool call relaunches it lazily via
 # get_or_create_browser(), exactly as happens after close_session today.
 IDLE_SECONDS_ENV_VAR = "LINKEDIN_BROWSER_IDLE_SECONDS"
-DEFAULT_IDLE_SECONDS = 600.0
+DEFAULT_IDLE_SECONDS = 180.0
 
 _idle_task: "asyncio.Task[None] | None" = None
 _in_flight_calls: int = 0
@@ -699,7 +699,12 @@ async def check_rate_limit() -> None:
 
 def reset_browser_for_testing() -> None:
     """Reset global browser state for test isolation."""
-    global _browser, _browser_cookie_export_path, _headless, _idle_task, _in_flight_calls
+    global \
+        _browser, \
+        _browser_cookie_export_path, \
+        _headless, \
+        _idle_task, \
+        _in_flight_calls
     if _idle_task is not None and not _idle_task.done():
         _idle_task.cancel()
     _idle_task = None
