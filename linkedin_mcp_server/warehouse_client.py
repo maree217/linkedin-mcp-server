@@ -20,6 +20,7 @@ cached capture available" and fall through to live scraping.
 
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -28,6 +29,20 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "http://127.0.0.1:7100"
 DEFAULT_TIMEOUT_SECONDS = 5.0
+
+
+def _capture_age_hours(occurred_at: str | None) -> float | None:
+    """Return hours elapsed since an ISO-8601 occurred_at timestamp, or None."""
+    if not occurred_at:
+        return None
+    try:
+        ts = datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    delta = datetime.now(timezone.utc) - ts
+    return delta.total_seconds() / 3600.0
 
 
 def _base_url() -> str:

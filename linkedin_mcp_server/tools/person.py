@@ -6,7 +6,8 @@ with configurable section selection.
 """
 
 import logging
-from datetime import datetime, timezone
+import asyncio
+from urllib.parse import urlparse
 from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
@@ -21,40 +22,33 @@ from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_er
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import parse_person_sections
 from linkedin_mcp_server.scraping.extractor import FilterValidationError
+from linkedin_mcp_server.warehouse_client import _capture_age_hours
 
 logger = logging.getLogger(__name__)
 
 
-def _capture_age_hours(occurred_at: str | None) -> float | None:
-    """Return hours elapsed since an ISO-8601 occurred_at timestamp, or None."""
-    if not occurred_at:
-        return None
-    try:
-        ts = datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=timezone.utc)
-    delta = datetime.now(timezone.utc) - ts
-    return delta.total_seconds() / 3600.0
+_CACHE_LOOKUP_TIMEOUT_SECONDS = 10.0
+_CACHE_LOOKUP_MAX_COMPANIES = 10
 
 
-async def _find_cached_person(
+def _username_from_url(linkedin_url: str) -> str | None:
+    """Return the path segment after /in/ (lowercased), or None."""
+    parts = [p for p in urlparse(linkedin_url).path.split("/") if p]
+    for idx, part in enumerate(parts[:-1]):
+        if part.lower() == "in":
+            return parts[idx + 1].lower()
+    return None
+
+
+async def _find_cached_person_uncapped(
     linkedin_username: str, max_age_hours: int
 ) -> dict[str, Any] | None:
-    """Best-effort lookup of a companion-captured person by LinkedIn username.
-
-    companion-api's /v1/companion/people endpoint is indexed by company/domain,
-    not by person. We fetch recent captures' companies and check each one's
-    captured people list for a linkedin_url matching this username. This is a
-    soft, best-effort cache lookup -- any failure or miss returns None so the
-    caller falls through to a live scrape.
-    """
     recent = await warehouse_client.fetch_recent_captures(limit=20)
     if not recent:
         return None
 
     seen_companies: set[str] = set()
+    targets: list[tuple[Any, Any]] = []
     for capture in recent.get("captures", []):
         company = capture.get("target_name")
         domain = capture.get("domain")
@@ -62,16 +56,24 @@ async def _find_cached_person(
         if key in seen_companies or (not company and not domain):
             continue
         seen_companies.add(key)
+        targets.append((company, domain))
+        if len(targets) >= _CACHE_LOOKUP_MAX_COMPANIES:
+            break
 
-        people_result = await warehouse_client.fetch_captured_people(
-            company=company, domain=domain
-        )
-        if not people_result:
+    results = await asyncio.gather(
+        *(
+            warehouse_client.fetch_captured_people(company=c, domain=d)
+            for c, d in targets
+        ),
+        return_exceptions=True,
+    )
+
+    wanted = linkedin_username.strip().lower()
+    for people_result in results:
+        if not people_result or isinstance(people_result, BaseException):
             continue
-
         for person in people_result.get("people", []):
-            linkedin_url = person.get("linkedin_url") or ""
-            if linkedin_username not in linkedin_url:
+            if _username_from_url(person.get("linkedin_url") or "") != wanted:
                 continue
             age_hours = _capture_age_hours(person.get("discovered_at"))
             if age_hours is not None and age_hours > max_age_hours:
@@ -81,8 +83,27 @@ async def _find_cached_person(
                 "source": "companion_capture",
                 "captured_at": person.get("discovered_at"),
             }
-
     return None
+
+
+async def _find_cached_person(
+    linkedin_username: str, max_age_hours: int
+) -> dict[str, Any] | None:
+    """Best-effort lookup of a companion-captured person by LinkedIn username.
+
+    companion-api's people endpoint is indexed by company/domain, so we fetch
+    the people lists for up to 10 recent capture companies concurrently and
+    exact-match the /in/<username> path segment. Any miss, failure or timeout
+    (10s ceiling) returns None so the caller falls through to a live scrape.
+    """
+    try:
+        return await asyncio.wait_for(
+            _find_cached_person_uncapped(linkedin_username, max_age_hours),
+            timeout=_CACHE_LOOKUP_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Cached person lookup timed out; falling back to live scrape")
+        return None
 
 
 def register_person_tools(

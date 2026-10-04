@@ -29,7 +29,7 @@ def register_warehouse_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Get Captured Company",
-        annotations={"readOnlyHint": True, "openWorldHint": True},
+        annotations={"readOnlyHint": True, "openWorldHint": False},
         tags={"company", "warehouse"},
     )
     async def get_captured_company(slug: str) -> dict[str, Any]:
@@ -58,7 +58,7 @@ def register_warehouse_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Get Captured People",
-        annotations={"readOnlyHint": True, "openWorldHint": True},
+        annotations={"readOnlyHint": True, "openWorldHint": False},
         tags={"person", "warehouse"},
     )
     async def get_captured_people(
@@ -86,7 +86,7 @@ def register_warehouse_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="List Recent Captures",
-        annotations={"readOnlyHint": True, "openWorldHint": True},
+        annotations={"readOnlyHint": True, "openWorldHint": False},
         tags={"company", "warehouse"},
     )
     async def list_recent_captures(limit: int = 20) -> dict[str, Any]:

@@ -6,7 +6,6 @@ with configurable section selection.
 """
 
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
 from fastmcp import Context, FastMCP
@@ -20,22 +19,9 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import parse_company_sections
 from linkedin_mcp_server.scraping.extractor import _RATE_LIMITED_MSG
 from linkedin_mcp_server.scraping.link_metadata import Reference
+from linkedin_mcp_server.warehouse_client import _capture_age_hours
 
 logger = logging.getLogger(__name__)
-
-
-def _capture_age_hours(occurred_at: str | None) -> float | None:
-    """Return hours elapsed since an ISO-8601 occurred_at timestamp, or None."""
-    if not occurred_at:
-        return None
-    try:
-        ts = datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=timezone.utc)
-    delta = datetime.now(timezone.utc) - ts
-    return delta.total_seconds() / 3600.0
 
 
 def register_company_tools(
