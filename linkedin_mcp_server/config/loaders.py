@@ -16,7 +16,10 @@ from dotenv import load_dotenv
 from .schema import AppConfig, ConfigurationError
 
 # Load .env file if present
-load_dotenv()
+try:
+    load_dotenv()
+except OSError:
+    pass
 
 logger = logging.getLogger(__name__)
 

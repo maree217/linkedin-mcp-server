@@ -58,12 +58,15 @@ def get_trace_dir() -> Path | None:
         return None
 
     if _TRACE_DIR is None:
-        _TRACE_DIR = Path(
-            tempfile.mkdtemp(
-                prefix="run-",
-                dir=_trace_root(),
-            )
-        ).resolve()
+        try:
+            _TRACE_DIR = Path(
+                tempfile.mkdtemp(
+                    prefix="run-",
+                    dir=_trace_root(),
+                )
+            ).resolve()
+        except OSError:
+            return None
     return _TRACE_DIR
 
 
