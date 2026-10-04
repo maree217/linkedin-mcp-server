@@ -1429,9 +1429,9 @@ class TestConnectWithPerson:
         assert "preload/custom-invite" in await_args.args[0]
 
     async def test_follow_only_after_more_does_not_send(self, mock_page):
-        """Pending or genuinely follow-only profile: invite anchor never
-        appears even after More-menu open. Critical write-gate guardrail —
-        no deeplink fires, no connection request goes out."""
+        """Genuinely follow-only profile: the deeplink is tried but no invite
+        dialog opens, so _submit_invite_dialog (the write-gate) reports
+        not-submitted and no connection request goes out."""
         extractor = LinkedInExtractor(mock_page)
         text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMessage\nMore\n"
 
@@ -1457,7 +1457,10 @@ class TestConnectWithPerson:
                 extractor, "_navigate_to_page", new_callable=AsyncMock
             ) as mock_nav,
             patch.object(
-                extractor, "_submit_invite_dialog", new_callable=AsyncMock
+                extractor,
+                "_submit_invite_dialog",
+                new_callable=AsyncMock,
+                return_value=(False, False, None),
             ) as mock_submit,
         ):
             result = await extractor.connect_with_person("testuser")
@@ -1465,14 +1468,15 @@ class TestConnectWithPerson:
         assert result["status"] == "connect_unavailable"
         assert result.get("note_sent") is False or "note_sent" not in result
         mock_open_more.assert_awaited_once()
-        # Critical: deeplink must NOT fire and dialog must NOT be submitted.
-        mock_nav.assert_not_awaited()
-        mock_submit.assert_not_awaited()
+        # Deeplink is always tried; the dialog write-gate declines to send.
+        mock_nav.assert_awaited_once()
+        mock_submit.assert_awaited_once_with(None)
 
     async def test_follow_only_with_note_reports_note_limit_from_deeplink_probe(
         self, mock_page
     ):
-        """A requested note may reveal Premium quota without submitting."""
+        """A requested note may hit the Premium quota block in the invite
+        dialog; nothing is sent and the limit message is surfaced."""
         extractor = LinkedInExtractor(mock_page)
         text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMessage\nMore\n"
 
@@ -1498,12 +1502,13 @@ class TestConnectWithPerson:
             ) as mock_nav,
             patch.object(
                 extractor,
-                "_probe_invite_note_limit",
+                "_submit_invite_dialog",
                 new_callable=AsyncMock,
-                return_value="Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium",
-            ) as mock_probe,
-            patch.object(
-                extractor, "_submit_invite_dialog", new_callable=AsyncMock
+                return_value=(
+                    False,
+                    False,
+                    "Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium",
+                ),
             ) as mock_submit,
         ):
             result = await extractor.connect_with_person("testuser", note="Hello")
@@ -1515,12 +1520,12 @@ class TestConnectWithPerson:
         )
         assert result["note_sent"] is False
         mock_nav.assert_awaited_once()
-        mock_probe.assert_awaited_once()
-        mock_submit.assert_not_awaited()
+        mock_submit.assert_awaited_once_with("Hello")
 
     async def test_more_menu_unavailable_does_not_send(self, mock_page):
         """Action root present but no More button (unusual but possible):
-        _open_more_menu returns False, no retry, no deeplink fires."""
+        _open_more_menu returns False; the deeplink is still tried but the
+        dialog write-gate reports not-submitted, so nothing is sent."""
         extractor = LinkedInExtractor(mock_page)
         text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMessage\n"
 
@@ -1542,14 +1547,17 @@ class TestConnectWithPerson:
                 extractor, "_navigate_to_page", new_callable=AsyncMock
             ) as mock_nav,
             patch.object(
-                extractor, "_submit_invite_dialog", new_callable=AsyncMock
+                extractor,
+                "_submit_invite_dialog",
+                new_callable=AsyncMock,
+                return_value=(False, False, None),
             ) as mock_submit,
         ):
             result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "connect_unavailable"
-        mock_nav.assert_not_awaited()
-        mock_submit.assert_not_awaited()
+        mock_nav.assert_awaited_once()
+        mock_submit.assert_awaited_once_with(None)
 
     async def test_returns_pending(self, mock_page):
         """Profile with a pending invitation: detected via labeled <a> in
